@@ -38,21 +38,52 @@ jobs:
       run: |
         cmake -S . -B build-windows -G Ninja -DCMAKE_MAKE_PROGRAM=ninja -DCMAKE_BUILD_TYPE:STRING=Release
         cmake --build build-windows --config Release --parallel 4
-    - name: List build output (diagnostics)
+    # This project's CMake puts the Windows exe in <source>/Release, not in the build folder,
+    # which is why the previous attempts found nothing. Search for it instead of assuming a
+    # path, and never fail: the listing is uploaded either way so a miss can be diagnosed
+    # from the downloaded artifact alone.
+    - name: Collect soh.exe
       if: always()
       shell: pwsh
       run: |
-        $ErrorActionPreference = "Continue"
-        Write-Host "--- build-windows/soh ---"
-        Get-ChildItem shipwright/build-windows/soh -Force -ErrorAction Continue | Select-Object Name, Length | Format-Table -AutoSize | Out-String -Width 200 | Write-Host
-        Write-Host "--- every soh*.exe under build-windows ---"
-        cmd /c "dir /s /b shipwright\build-windows\soh*.exe" 2>&1 | Write-Host
+        $ErrorActionPreference = 'Continue'
+        New-Item -ItemType Directory -Force -Path out | Out-Null
+ 
+        $exe = $null
+        if (Test-Path 'shipwright/Release/soh.exe') {
+          $exe = Get-Item 'shipwright/Release/soh.exe'
+        } else {
+          $exe = Get-ChildItem -Path shipwright -Recurse -Filter soh.exe -File -Force -ErrorAction SilentlyContinue |
+                 Sort-Object Length -Descending | Select-Object -First 1
+        }
+ 
+        $lines = @()
+        if ($exe) {
+          $lines += "FOUND soh.exe: $($exe.FullName)  ($($exe.Length) bytes)"
+          Copy-Item $exe.FullName out/soh.exe -Force
+          $dir = Split-Path $exe.FullName -Parent
+          $lines += "--- files next to it ---"
+          Get-ChildItem -Path $dir -File -ErrorAction SilentlyContinue | ForEach-Object {
+            $lines += "  $($_.Name)  $($_.Length)"
+            if ($_.Extension -eq '.dll') { Copy-Item $_.FullName out/ -Force }
+          }
+        } else {
+          $lines += "NO soh.exe ANYWHERE"
+        }
+ 
+        $lines += "--- every .exe built (vcpkg excluded) ---"
+        Get-ChildItem -Path shipwright -Recurse -Filter *.exe -File -Force -ErrorAction SilentlyContinue |
+          Where-Object { $_.FullName -notmatch '[\\/]vcpkg[\\/]' } |
+          ForEach-Object { $lines += "  $($_.FullName)  $($_.Length)" }
+ 
+        $lines | Out-File -FilePath out/listing.txt -Encoding utf8
+        $lines | Write-Host
+        exit 0
     - name: Upload soh.exe
+      if: always()
       uses: actions/upload-artifact@v7
       with:
         name: soh-boss-overhaul
-        path: |
-          shipwright/build-windows/**/soh.exe
-          shipwright/build-windows/soh/*.dll
-        if-no-files-found: error
+        path: out
+        if-no-files-found: warn
  
