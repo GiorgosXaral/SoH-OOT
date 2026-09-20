@@ -38,16 +38,21 @@ jobs:
       run: |
         cmake -S . -B build-windows -G Ninja -DCMAKE_MAKE_PROGRAM=ninja -DCMAKE_BUILD_TYPE:STRING=Release
         cmake --build build-windows --config Release --parallel 4
-    - name: Collect soh.exe
+    - name: List build output (diagnostics)
+      if: always()
       shell: pwsh
       run: |
-        $exe = Get-ChildItem -Path shipwright/build-windows -Filter soh.exe -Recurse | Select-Object -First 1
-        if (-not $exe) { throw "soh.exe was not produced" }
-        New-Item -ItemType Directory -Path out | Out-Null
-        Copy-Item $exe.FullName out/soh.exe
-        Get-ChildItem out
+        $ErrorActionPreference = "Continue"
+        Write-Host "--- build-windows/soh ---"
+        Get-ChildItem shipwright/build-windows/soh -Force -ErrorAction Continue | Select-Object Name, Length | Format-Table -AutoSize | Out-String -Width 200 | Write-Host
+        Write-Host "--- every soh*.exe under build-windows ---"
+        cmd /c "dir /s /b shipwright\build-windows\soh*.exe" 2>&1 | Write-Host
     - name: Upload soh.exe
       uses: actions/upload-artifact@v7
       with:
         name: soh-boss-overhaul
-        path: out/soh.exe
+        path: |
+          shipwright/build-windows/**/soh.exe
+          shipwright/build-windows/soh/*.dll
+        if-no-files-found: error
+ 
