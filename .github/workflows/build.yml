@@ -25,6 +25,9 @@ jobs:
     - name: Apply Boss Overhaul patch
       working-directory: shipwright
       run: git apply --whitespace=nowarn ../builder/boss-overhaul.patch
+      name: Apply Miniboss Overhaul patch
+      working-directory: shipwright
+      run: git apply --whitespace=nowarn ../builder/miniboss-overhaul.patch
     - name: Install ninja
       run: |
         choco install ninja -y
