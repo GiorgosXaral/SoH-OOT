@@ -72,3 +72,34 @@ Hybrid: Freeform, but it switches to Tank while you aim in first person, like sh
 Handling sliders: turn and brake strength for each mode, plus a minimum turn speed for Freeform.
 Bunny Hood Boost: Epona runs and turns twice as fast while Link wears the Bunny Hood. The hood only exists in Majora's Mask, so this option does nothing in Ship of Harkinian.
 Unticking "Enable Epona Control Overhaul" gives you vanilla riding back.
+
+
+
+MINI BOSSES
+
+Stalfos (Forest Temple + Ganon's Castle Forest Trial) — 10 → 20 hits. Closes distance faster once bloodied, lunges further on jump-slash,
+and chains a second downward slash if you're still in range afterward. Regular Stalfos guards elsewhere in the castle are untouched.
+
+Flare Dancer (Fire Temple, x2) — 24 → 48 hits. Faster spin, 12 flames per burst instead of 8, faster circling, shorter downtime once below
+half health. Doubling its HP just doubles how many times you have to expose and burn its core — reused its existing mechanic, 
+no core-actor changes needed.
+
+Dark Link (Water Temple) — HP scales with Link's own max health, doubled. Loses his "mercy" behavior once bloodied: stops backing 
+off when you're low and attacks faster instead, and resists staggering.
+
+Dead Hand (Shadow Temple + Bottom of the Well) — 14 → 28 hits (adult), 20 → 40 (child). Faster bite windup and longer chain range 
+once bloodied, shorter burrow downtime. Its four hands are worth double hits too and chase faster as Dead Hand itself gets more
+desperate.
+
+Iron Knuckle / possessed Nabooru (Spirit Temple x2 + Spirit Trial) — 30 → 60 hits (50 → 100 for Nabooru). Faster charge and axe 
+swing once armor breaks, chains straight into another attack instead of repositioning.
+
+New: Lizalfos/Dinolfos, White Wolfos, Big Octo, Poe Sisters, Dodongo — each gets Double HP plus a genuine behavior change
+(presses attacks harder, wider engagement, etc.), following the same "more interesting, not just cranked-up numbers" philosophy.
+Big Poe — deliberately no HP change (it's a one-arrow capture, not a fight — doubling it would be exactly the kind of padding you called out).
+Instead it weaves harder and faster while fleeing, so the chase itself is livelier.
+
+New: Lizalfos/Dinolfos, White Wolfos, Big Octo, Poe Sisters, Dodongo — each gets Double HP plus a genuine behavior change (presses attacks harder,
+wider engagement, etc.), following the same "more interesting, not just cranked-up numbers" philosophy.
+
+
