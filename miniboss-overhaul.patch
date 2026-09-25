@@ -1,0 +1,4184 @@
+diff --git a/soh/include/enemy_overhaul.h b/soh/include/enemy_overhaul.h
+new file mode 100644
+index 0000000..ea00f4b
+--- /dev/null
++++ b/soh/include/enemy_overhaul.h
+@@ -0,0 +1,179 @@
++#ifndef ENEMY_OVERHAUL_H
++#define ENEMY_OVERHAUL_H
++
++/**
++ * Miniboss & Enemy Overhaul (Enhancements > Difficulty > Enemies)
++ *
++ * Builds on the Boss Overhaul and follows the same rules:
++ *  - nothing new is loaded: every attack is made of vanilla actors, effects, sounds and display lists (Ship of
++ *    Harkinian loads assets by name, so an enemy or a model doesn't have to belong to the room it shows up in);
++ *  - vanilla pauses, recovery times and weak point windows are never shortened;
++ *  - anything an enemy summons dies with it, so a "defeat all enemies" door can't be kept shut;
++ *  - quest rules (Poe Sisters' torches, Gerudo keys, Big Poes, the Kokiri Sword skip...) keep working.
++ *
++ * Every toggle is on by default and is read while the game runs.
++ */
++
++#include "z64.h"
++#include <libultraship/bridge/consolevariablebridge.h>
++#include "soh/cvar_prefixes.h"
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++#define EO_CVAR_MINIBOSS_HP CVAR_ENHANCEMENT("EnemyOverhaul.MinibossHP")
++#define EO_CVAR_MINIBOSS_ATTACKS CVAR_ENHANCEMENT("EnemyOverhaul.MinibossAttacks")
++#define EO_CVAR_DARK_LINK CVAR_ENHANCEMENT("EnemyOverhaul.DarkLink")
++#define EO_CVAR_DEAD_HAND CVAR_ENHANCEMENT("EnemyOverhaul.DeadHand")
++#define EO_CVAR_ENEMIES CVAR_ENHANCEMENT("EnemyOverhaul.Enemies")
++#define EO_CVAR_ENCOUNTERS CVAR_ENHANCEMENT("EnemyOverhaul.Encounters")
++#define EO_CVAR_ENCOUNTERS_DUNGEONS CVAR_ENHANCEMENT("EnemyOverhaul.EncountersInDungeons")
++#define EO_CVAR_ELITES CVAR_ENHANCEMENT("EnemyOverhaul.Elites")
++#define EO_CVAR_GANONS_REIGN CVAR_ENHANCEMENT("EnemyOverhaul.GanonsReign")
++
++#define EO_MB_HP_ON() (CVarGetInteger(EO_CVAR_MINIBOSS_HP, 1) != 0)
++#define EO_MB_ATTACKS_ON() (CVarGetInteger(EO_CVAR_MINIBOSS_ATTACKS, 1) != 0)
++#define EO_DARK_LINK_ON() (CVarGetInteger(EO_CVAR_DARK_LINK, 1) != 0)
++#define EO_DEAD_HAND_ON() (CVarGetInteger(EO_CVAR_DEAD_HAND, 1) != 0)
++#define EO_ENEMIES_ON() (CVarGetInteger(EO_CVAR_ENEMIES, 1) != 0)
++#define EO_ENCOUNTERS_ON() (CVarGetInteger(EO_CVAR_ENCOUNTERS, 1) != 0)
++#define EO_ENCOUNTERS_DUNGEONS_ON() (CVarGetInteger(EO_CVAR_ENCOUNTERS_DUNGEONS, 1) != 0)
++#define EO_ELITES_ON() (CVarGetInteger(EO_CVAR_ELITES, 1) != 0)
++#define EO_GANONS_REIGN_ON() (CVarGetInteger(EO_CVAR_GANONS_REIGN, 1) != 0)
++
++// Scales a miniboss' vanilla health constant, or a threshold compared against health: 2x.
++#define EO_HP2(vanilla) (EO_MB_HP_ON() ? ((vanilla) * 2) : (vanilla))
++// Dark Link and Dead Hand have their own toggles.
++#define EO_DARK_LINK_HP(vanilla) (EO_DARK_LINK_ON() ? ((vanilla) * 2) : (vanilla))
++#define EO_DEAD_HAND_HP(vanilla) (EO_DEAD_HAND_ON() ? ((vanilla) * 2) : (vanilla))
++
++// True when `cur` is at or below num/den of `max`.
++#define EO_AT_OR_BELOW(cur, max, num, den) (((s32)(cur) * (den)) <= ((s32)(max) * (num)))
++
++/* ---------------------------------------------------------------------------------------------------------------
++ * Shots (ovl_En_Eo_Shot): projectiles, ground waves, shockwave rings, thrown weapons and falling rocks that any enemy
++ * can use. The shot is its own small actor (registered in the ActorDB like Ivan), never counted as an enemy.
++ * --------------------------------------------------------------------------------------------------------------- */
++
++typedef enum EoShotMode {
++    /* 0 */ EO_SHOT_ORB,         // a glowing ball of fire, ice, lightning, darkness, light, water or mud
++    /* 1 */ EO_SHOT_GROUND_WAVE, // a hitbox racing along the floor, trailing dust / flames / frost / water / darkness
++    /* 2 */ EO_SHOT_RING,        // an expanding ring on the floor: hurts Link where it passes, unless he is airborne
++    /* 3 */ EO_SHOT_BOOMERANG,   // a spinning display list that flies out and comes back to its owner
++    /* 4 */ EO_SHOT_FALLING,     // a display list (rock...) or an orb dropping from above onto a marked spot
++} EoShotMode;
++
++typedef enum EoKind {
++    /* 0 */ EO_KIND_FIRE,  // burns
++    /* 1 */ EO_KIND_ICE,   // freezes
++    /* 2 */ EO_KIND_SHOCK, // shocks
++    /* 3 */ EO_KIND_DARK,
++    /* 4 */ EO_KIND_LIGHT,
++    /* 5 */ EO_KIND_WATER, // knocks back, half a heart
++    /* 6 */ EO_KIND_EMBER, // a small, short-lived flame that drifts
++    /* 7 */ EO_KIND_MUD,   // half a heart
++    /* 8 */ EO_KIND_MAX
++} EoKind;
++
++typedef enum EoLook {
++    /* 0 */ EO_LOOK_DUST,
++    /* 1 */ EO_LOOK_FIRE,
++    /* 2 */ EO_LOOK_ICE,
++    /* 3 */ EO_LOOK_WATER,
++    /* 4 */ EO_LOOK_DARK,
++} EoLook;
++
++struct EnEoShot;
++
++// Actor id of the shot, set when the ActorDB registers it.
++extern s16 gEnEoShotId;
++
++// Number of live shots of `mode` fired by `owner`.
++s32 EoShot_CountOwned(Actor* owner, s32 mode);
++
++// An orb flying with `vel`. Returns the shot actor, or NULL.
++Actor* EoShot_Orb(PlayState* play, Actor* owner, s32 kind, Vec3f* pos, Vec3f* vel);
++// An orb aimed at Link's chest, turned sideways by `yawOffset`.
++Actor* EoShot_OrbAimed(PlayState* play, Actor* owner, s32 kind, Vec3f* pos, f32 speed, s16 yawOffset);
++// A fan of `count` orbs aimed at Link, `spread` apart.
++void EoShot_OrbFan(PlayState* play, Actor* owner, s32 kind, Vec3f* pos, f32 speed, s32 count, s16 spread);
++// A flat ring of `count` orbs flying outwards.
++void EoShot_OrbRing(PlayState* play, Actor* owner, s32 kind, Vec3f* pos, f32 speed, s32 count, s16 baseYaw);
++// An orb lobbed onto `to`, landing after `frames` frames.
++Actor* EoShot_OrbLob(PlayState* play, Actor* owner, s32 kind, Vec3f* pos, Vec3f* to, f32 frames);
++// Makes an orb turn towards Link by up to `step` each frame.
++void EoShot_SetHoming(Actor* shot, s16 step);
++// Overrides an orb's damage (0x10 is one heart) and hit effect (0 none, 1 fire, 2 ice, 3 shock, 4 knockback).
++void EoShot_SetDamage(Actor* shot, u8 damage, u8 effect);
++
++// A wave racing along the floor from `pos` in direction `yaw`.
++Actor* EoShot_GroundWave(PlayState* play, Actor* owner, s32 look, Vec3f* pos, s16 yaw, f32 speed, s16 life,
++                         u8 damage);
++// A fan of ground waves aimed at Link.
++void EoShot_GroundWaveFan(PlayState* play, Actor* owner, s32 look, Vec3f* pos, s32 count, s16 spread, f32 speed,
++                          s16 life, u8 damage);
++// An expanding ring on the floor around `pos`. Link clears it with any jump, sidehop or backflip.
++Actor* EoShot_Ring(PlayState* play, Actor* owner, s32 look, Vec3f* pos, f32 radiusMax, f32 radiusStep, u8 damage);
++// A spinning weapon that flies out along `yaw` and comes back to `owner`.
++Actor* EoShot_Boomerang(PlayState* play, Actor* owner, Gfx* dList, f32 scale, Vec3f* pos, s16 yaw, f32 speed,
++                        u8 damage);
++// Something falling from `height` above `spot`, the spot marked with dust during the whole fall.
++Actor* EoShot_Falling(PlayState* play, Actor* owner, Gfx* dList, f32 scale, Vec3f* spot, f32 height, u8 damage);
++// The same with an orb of `kind` instead of a model.
++Actor* EoShot_FallingOrb(PlayState* play, Actor* owner, s32 kind, Vec3f* spot, f32 height, u8 damage);
++
++// Forgets `actor` as the owner of any live shot (called when it is destroyed).
++void EoShot_ForgetOwner(Actor* actor);
++
++/* ---------------------------------------------------------------------------------------------------------------
++ * Summons: vanilla enemies called in by another enemy. They vanish in a puff of smoke with their summoner.
++ * --------------------------------------------------------------------------------------------------------------- */
++
++Actor* EoSummon_Spawn(PlayState* play, Actor* owner, s16 actorId, Vec3f* pos, s16 rotY, s16 params);
++s32 EoSummon_Count(Actor* owner);
++void EoSummon_KillAll(Actor* owner, PlayState* play);
++// True for an actor spawned by EoSummon_Spawn that is still alive.
++s32 EoSummon_IsSummon(Actor* actor);
++
++/* ---------------------------------------------------------------------------------------------------------------
++ * Hooks (called from EnemyOverhaul.cpp and Actor_Draw)
++ * --------------------------------------------------------------------------------------------------------------- */
++
++void EnemyOverhaul_OnActorInit(Actor* actor);
++void EnemyOverhaul_OnActorUpdate(Actor* actor);
++void EnemyOverhaul_OnActorKill(Actor* actor);
++void EnemyOverhaul_OnActorDestroy(Actor* actor);
++// Called by Actor_Draw right after the actor's model matrix is set up.
++void EnemyOverhaul_OnActorPreDraw(Actor* actor);
++// True while the actor was rolled as an elite.
++s32 EoElite_Is(Actor* actor);
++
++/* ---------------------------------------------------------------------------------------------------------------
++ * Small helpers
++ * --------------------------------------------------------------------------------------------------------------- */
++
++// Hurts and knocks Link back unless he is invincible, in a cutscene or not on the ground (when `groundOnly`).
++s32 Eo_HurtPlayer(PlayState* play, Actor* source, u8 damage, s16 yaw, f32 knockback, s32 groundOnly, s32 shock);
++// True while Link is standing on the ground (not jumping, sidehopping, backflipping, climbing or riding).
++s32 Eo_PlayerOnGround(PlayState* play);
++// The floor under (or a little above) `pos`, if it is within `maxDrop` below it.
++s32 Eo_FindFloor(PlayState* play, Vec3f* pos, f32 maxDrop, f32* outY);
++// A point `dist` behind Link on the floor, with no wall in between. False (and Link's position) when there is none.
++s32 Eo_PosBehindPlayer(PlayState* play, f32 dist, Vec3f* outPos);
++// A point `dist` from `from` towards `yaw` on the floor with no wall in between.
++s32 Eo_PosAround(PlayState* play, Vec3f* from, s16 yaw, f32 dist, Vec3f* outPos);
++// A puff of smoke, for summons that come and go.
++void Eo_Puff(PlayState* play, Vec3f* pos, f32 scale);
++// A puff of dark mist, for teleports.
++void Eo_DarkPuff(PlayState* play, Vec3f* pos, f32 scale);
++// True when no cutscene is running and Link can be attacked.
++s32 Eo_CanAttack(PlayState* play);
++// Link's chest.
++void Eo_PlayerAimPoint(PlayState* play, Vec3f* out);
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif
+diff --git a/soh/soh/ActorDB.cpp b/soh/soh/ActorDB.cpp
+index 70ea296..f4bb2fc 100644
+--- a/soh/soh/ActorDB.cpp
++++ b/soh/soh/ActorDB.cpp
+@@ -612,8 +612,25 @@ static ActorDBInit EnPartnerInit = {
+ };
+ extern "C" s16 gEnPartnerId;
+ 
++// Miniboss & Enemy Overhaul: projectiles, ground waves, shockwave rings, thrown weapons and falling rocks
++#include "src/overlays/actors/ovl_En_Eo_Shot/z_en_eo_shot.h"
++static ActorDBInit EnEoShotInit = {
++    "En_Eo_Shot",
++    "Enemy Overhaul Shot",
++    ACTORCAT_MISC,
++    (ACTOR_FLAG_UPDATE_CULLING_DISABLED | ACTOR_FLAG_DRAW_CULLING_DISABLED),
++    OBJECT_GAMEPLAY_KEEP,
++    sizeof(EnEoShot),
++    (ActorFunc)EnEoShot_Init,
++    (ActorFunc)EnEoShot_Destroy,
++    (ActorFunc)EnEoShot_Update,
++    (ActorFunc)EnEoShot_Draw,
++    nullptr,
++};
++
+ void ActorDB::AddBuiltInCustomActors() {
+     gEnPartnerId = ActorDB::Instance->AddEntry(EnPartnerInit).entry.id;
++    gEnEoShotId = ActorDB::Instance->AddEntry(EnEoShotInit).entry.id;
+ }
+ 
+ extern "C" ActorDBEntry* ActorDB_Retrieve(const int id) {
+diff --git a/soh/soh/Enhancements/EnemyOverhaul.cpp b/soh/soh/Enhancements/EnemyOverhaul.cpp
+new file mode 100644
+index 0000000..e68858f
+--- /dev/null
++++ b/soh/soh/Enhancements/EnemyOverhaul.cpp
+@@ -0,0 +1,26 @@
++#include "soh/Enhancements/game-interactor/GameInteractor_Hooks.h"
++#include "soh/ShipInit.hpp"
++
++extern "C" {
++#include "functions.h"
++#include "enemy_overhaul.h"
++}
++
++// Miniboss & Enemy Overhaul: hooks. The mechanics themselves live in the actors, z_enemy_overhaul.c and
++// ovl_En_Eo_Shot; this only routes the game's actor events to them.
++static void RegisterEnemyOverhaul() {
++    const bool encountersOrElites = EO_ENCOUNTERS_ON() || EO_ELITES_ON();
++
++    // Shots and summons are always kept tidy, whatever the toggles, so nothing is left pointing at a freed actor
++    COND_HOOK(OnActorDestroy, true, [](void* actor) { EnemyOverhaul_OnActorDestroy((Actor*)actor); });
++
++    // Companions, tag-alongs, elites and Ganon's Reign
++    COND_HOOK(OnActorInit, encountersOrElites, [](void* actor) { EnemyOverhaul_OnActorInit((Actor*)actor); });
++    COND_HOOK(OnActorUpdate, encountersOrElites, [](void* actor) { EnemyOverhaul_OnActorUpdate((Actor*)actor); });
++    COND_HOOK(OnActorKill, EO_ELITES_ON(), [](void* actor) { EnemyOverhaul_OnActorKill((Actor*)actor); });
++}
++
++static RegisterShipInitFunc initFunc(RegisterEnemyOverhaul,
++                                     { EO_CVAR_MINIBOSS_HP, EO_CVAR_MINIBOSS_ATTACKS, EO_CVAR_DARK_LINK,
++                                       EO_CVAR_DEAD_HAND, EO_CVAR_ENEMIES, EO_CVAR_ENCOUNTERS,
++                                       EO_CVAR_ENCOUNTERS_DUNGEONS, EO_CVAR_ELITES, EO_CVAR_GANONS_REIGN });
+diff --git a/soh/soh/SohGui/SohMenuEnhancements.cpp b/soh/soh/SohGui/SohMenuEnhancements.cpp
+index 69d415d..3ccc817 100644
+--- a/soh/soh/SohGui/SohMenuEnhancements.cpp
++++ b/soh/soh/SohGui/SohMenuEnhancements.cpp
+@@ -1371,6 +1371,83 @@ void SohMenu::AddMenuEnhancements() {
+             "All main bosses (Gohma through Ganon) gain additional attacks, and become more aggressive once "
+             "they are badly hurt.\n\n"
+             "Takes effect the next time a boss fight starts."));
++    AddWidget(path, "Miniboss & Enemy Overhaul", WIDGET_SEPARATOR_TEXT);
++    AddWidget(path, "Minibosses: Double HP", WIDGET_CVAR_CHECKBOX)
++        .CVar(CVAR_ENHANCEMENT("EnemyOverhaul.MinibossHP"))
++        .Options(CheckboxOptions().DefaultValue(true).Tooltip(
++            "Minibosses have twice as much health: the Dodongo's Cavern Lizalfos, Stalfos, Big Octo, Flare Dancer, "
++            "Iron Knuckles (Nabooru included), the Gerudo fighters, the Poe Sisters, and the Wolfos and White "
++            "Wolfos placed in rooms (not the ones roaming Hyrule Field).\n\n"
++            "Dark Link and Dead Hand have their own setting below.\n\n"
++            "Takes effect the next time a miniboss appears."));
++    AddWidget(path, "Minibosses: New Attacks", WIDGET_CVAR_CHECKBOX)
++        .CVar(CVAR_ENHANCEMENT("EnemyOverhaul.MinibossAttacks"))
++        .Options(CheckboxOptions().DefaultValue(true).Tooltip(
++            "Every miniboss learns new moves, made only of things already in the game:\n"
++            "- Lizalfos (Dodongo's Cavern): landing shockwaves, and slashes that carry along the floor\n"
++            "- Stalfos: floor-splitting chops, landing shockwaves, and a shield that can shove Link back\n"
++            "- Big Octo: water jets while circling and a wave when it belly-flops\n"
++            "- Flare Dancer: fireballs, burning footprints and rings of fire; the core spits fire as it runs\n"
++            "- Iron Knuckle: a boomerang axe throw and floor-splitting smashes; the armor bursts off with a "
++            "shockwave\n"
++            "- Gerudo fighters: a dust sweep after the spin, landing shockwaves, and a vanishing strike from behind\n"
++            "- Poe Sisters: each throws a ball of her own color\n"
++            "- Wolfos: a badly hurt miniboss Wolfos howls for help; White Wolfos claws can freeze\n\n"
++            "Vanilla openings are never shortened, and anything a miniboss calls in vanishes when it falls. "
++            "Shockwaves along the floor can be cleared with any jump, sidehop or backflip."));
++    AddWidget(path, "Dark Link Rework", WIDGET_CVAR_CHECKBOX)
++        .CVar(CVAR_ENHANCEMENT("EnemyOverhaul.DarkLink"))
++        .Options(CheckboxOptions().DefaultValue(true).Tooltip(
++            "Dark Link has twice as much health and fights much harder: he throws shadow bolts when kept at a "
++            "distance (and dodges arrows to answer with one), bursts into a ring of darkness when Link stays close, "
++            "and once badly hurt swings twice as often and rises from the water in darkness.\n\n"
++            "He stands still while winding up either move - a good moment to hit him."));
++    AddWidget(path, "Dead Hand Rework", WIDGET_CVAR_CHECKBOX)
++        .CVar(CVAR_ENHANCEMENT("EnemyOverhaul.DeadHand"))
++        .Options(CheckboxOptions().DefaultValue(true).Tooltip(
++            "Dead Hand has twice as much health and fights much harder: he bursts out of the ground with a "
++            "shockwave, spits balls of cursed darkness (three at once when badly hurt, when he also walks faster), "
++            "and his hands reach further, slam the floor to send tremors at Link and burrow up close to him when he "
++            "keeps away."));
++    AddWidget(path, "Enemies: New Tricks", WIDGET_CVAR_CHECKBOX)
++        .CVar(CVAR_ENHANCEMENT("EnemyOverhaul.Enemies"))
++        .Options(CheckboxOptions().DefaultValue(true).Tooltip(
++            "Regular enemies get a new trick each:\n"
++            "- ReDead: its scream wakes the dead nearby, who chase Link further than usual\n"
++            "- Gibdo: sudden lunges\n"
++            "- Like Like: breathes in with its mouth open, dragging Link towards it (Iron Boots hold firm)\n"
++            "- Octorok: every third shot is a spread of three rocks\n"
++            "- Mad Scrub: every other spit is a spread of three nuts (all can be sent back)\n"
++            "- Armos: the last hop of a lunge sends out a shockwave\n"
++            "- Wallmaster: a missed grab slams the floor with a shockwave\n"
++            "- Freezard: its icy breath ends with a spit of ice shards\n"
++            "- Poe: flicks embers from its lantern while Link watches it\n"
++            "- Lizalfos (outside Dodongo's Cavern): landing shockwaves\n"
++            "- Dinolfos: breathe fire at middle distance"));
++    AddWidget(path, "More Encounters", WIDGET_CVAR_CHECKBOX)
++        .CVar(CVAR_ENHANCEMENT("EnemyOverhaul.Encounters"))
++        .Options(CheckboxOptions().DefaultValue(true).Tooltip(
++            "Some enemies bring one or two of their own kind along, and a few regions add a creature that belongs "
++            "there (Keese with the field's Stalchildren, Withered Deku Babas in the forest, Fire Keese on the "
++            "mountain...). Hyrule Field's Stalchildren, the Leevers, Tektites and Wolfos sometimes send one "
++            "more.\n\n"
++            "Never in boss rooms, shops, minigames, grottos, houses or the Thieves' Hideout."));
++    AddWidget(path, "More Encounters: In Dungeons", WIDGET_CVAR_CHECKBOX)
++        .CVar(CVAR_ENHANCEMENT("EnemyOverhaul.EncountersInDungeons"))
++        .Options(CheckboxOptions().DefaultValue(true).Tooltip(
++            "Also adds companions inside dungeons, except in rooms whose door, chest or gate opens once every enemy "
++            "is defeated."));
++    AddWidget(path, "Rare Elite Enemies", WIDGET_CVAR_CHECKBOX)
++        .CVar(CVAR_ENHANCEMENT("EnemyOverhaul.Elites"))
++        .Options(CheckboxOptions().DefaultValue(true).Tooltip(
++            "About one enemy in twenty is an elite: bigger, sparkling gold, with twice the health, and it drops a "
++            "bonus item (a red or purple rupee, or whatever Link is shortest of) when defeated."));
++    AddWidget(path, "Ganon's Reign", WIDGET_CVAR_CHECKBOX)
++        .CVar(CVAR_ENHANCEMENT("EnemyOverhaul.GanonsReign"))
++        .Options(CheckboxOptions().DefaultValue(true).Tooltip(
++            "Once Ganondorf rules Hyrule (as adult Link), companions are twice as common, three times at night, "
++            "and elites show up more often at night.\n\n"
++            "Needs More Encounters and/or Rare Elite Enemies."));
+     AddWidget(path, "Hyper Bosses", WIDGET_CVAR_CHECKBOX)
+         .CVar(CVAR_ENHANCEMENT("HyperBosses"))
+         .Callback([](WidgetInfo& info) { UpdateHyperBossesState(); })
+diff --git a/soh/src/code/z_actor.c b/soh/src/code/z_actor.c
+index 54c33e2..fb2776d 100644
+--- a/soh/src/code/z_actor.c
++++ b/soh/src/code/z_actor.c
+@@ -16,6 +16,7 @@
+ #include "soh/Enhancements/nametag.h"
+ 
+ #include "soh/ActorDB.h"
++#include "enemy_overhaul.h"
+ #include "soh/OTRGlobals.h"
+ 
+ #include <string.h>
+@@ -2771,6 +2772,8 @@ void Actor_Draw(PlayState* play, Actor* actor) {
+     }
+ 
+     Matrix_Scale(actor->scale.x, actor->scale.y, actor->scale.z, MTXMODE_APPLY);
++    // Miniboss & Enemy Overhaul: elite enemies are drawn bigger
++    EnemyOverhaul_OnActorPreDraw(actor);
+     Actor_SetObjectDependency(play, actor);
+ 
+     gSPSegment(POLY_OPA_DISP++, 0x06, play->objectCtx.status[actor->objBankIndex].segment);
+diff --git a/soh/src/code/z_enemy_overhaul.c b/soh/src/code/z_enemy_overhaul.c
+new file mode 100644
+index 0000000..ead5e51
+--- /dev/null
++++ b/soh/src/code/z_enemy_overhaul.c
+@@ -0,0 +1,950 @@
++/**
++ * Miniboss & Enemy Overhaul: summons, helpers, and the encounter extras (companions, spawner tag-alongs, elites and
++ * Ganon's Reign). The projectiles live in ovl_En_Eo_Shot; see enemy_overhaul.h for the rules everything follows.
++ *
++ *  - Companions: some enemies placed in a room bring one or two of their own kind along, and in a few regions a
++ *    creature that belongs there (Keese with the night field's Stalchildren, Withered Deku Babas with the forest's
++ *    Deku Babas, Fire Keese with the mountain's Tektites and Baby Dodongos, Blue Bubbles with Kakariko's Keese).
++ *  - Tag-alongs: the random-encounter spawners (Hyrule Field's Stalchildren, the Leevers, the Tektites, the Wolfos)
++ *    sometimes send one more than usual.
++ *  - Elites: about one enemy in twenty is bigger, sparkles gold, has twice the health and drops something better.
++ *  - Ganon's Reign: once Ganondorf rules (adult Link), companions are twice as common, three times at night, with
++ *    more elites at night.
++ *
++ * Nothing is added to boss rooms, shops, minigames, grottos, houses or the Thieves' Hideout, nor (in dungeons) to a
++ * room whose door, chest or gate opens once every enemy is defeated. Extra enemies are ordinary enemies that don't
++ * count towards any spawner, never bring companions of their own, and are placed on open floor in sight of the enemy
++ * that brought them.
++ */
++
++#include "global.h"
++#include "enemy_overhaul.h"
++#include "overlays/actors/ovl_En_Firefly/z_en_firefly.h"
++#include "overlays/actors/ovl_En_Reeba/z_en_reeba.h"
++#include "overlays/actors/ovl_En_Poh/z_en_poh.h"
++#include "overlays/actors/ovl_En_Bili/z_en_bili.h"
++
++static Vec3f sEoZeroVec = { 0.0f, 0.0f, 0.0f };
++
++/* ---------------------------------------------------------------------------------------------------------------
++ * Helpers
++ * --------------------------------------------------------------------------------------------------------------- */
++
++s32 Eo_CanAttack(PlayState* play) {
++    Player* player = GET_PLAYER(play);
++
++    return !Play_InCsMode(play) && !Player_InBlockingCsMode(play, player) && (gSaveContext.health > 0);
++}
++
++s32 Eo_PlayerOnGround(PlayState* play) {
++    Player* player = GET_PLAYER(play);
++
++    return (player->actor.bgCheckFlags & 1) && !(player->stateFlags1 & PLAYER_STATE1_ON_HORSE);
++}
++
++s32 Eo_HurtPlayer(PlayState* play, Actor* source, u8 damage, s16 yaw, f32 knockback, s32 groundOnly, s32 shock) {
++    Player* player = GET_PLAYER(play);
++
++    if ((player->invincibilityTimer != 0) || !Eo_CanAttack(play) || (player->stateFlags1 & PLAYER_STATE1_ON_HORSE) ||
++        (player->stateFlags2 & PLAYER_STATE2_GRABBED_BY_ENEMY)) {
++        return false;
++    }
++    if (groundOnly && !Eo_PlayerOnGround(play)) {
++        return false;
++    }
++
++    func_8002F698(play, source, knockback, yaw, knockback * 0.6f,
++                  shock ? PLAYER_KNOCKBACK_LARGE_SHOCK : PLAYER_KNOCKBACK_LARGE, damage);
++    return true;
++}
++
++s32 Eo_FindFloor(PlayState* play, Vec3f* pos, f32 maxDrop, f32* outY) {
++    CollisionPoly* poly;
++    Vec3f probe = *pos;
++    f32 floorY;
++
++    probe.y += 80.0f;
++    floorY = BgCheck_EntityRaycastFloor1(&play->colCtx, &poly, &probe);
++    if ((floorY <= BGCHECK_Y_MIN + 1.0f) || ((pos->y - floorY) > maxDrop)) {
++        return false;
++    }
++    *outY = floorY;
++    return true;
++}
++
++s32 Eo_PosAround(PlayState* play, Vec3f* from, s16 yaw, f32 dist, Vec3f* outPos) {
++    Vec3f start = *from;
++    Vec3f hitPos;
++    CollisionPoly* poly;
++    s32 bgId;
++    f32 floorY;
++
++    outPos->x = from->x + (Math_SinS(yaw) * dist);
++    outPos->y = from->y + 30.0f;
++    outPos->z = from->z + (Math_CosS(yaw) * dist);
++    start.y += 30.0f;
++
++    if (!BgCheck_EntityLineTest1(&play->colCtx, &start, outPos, &hitPos, &poly, true, false, false, true, &bgId) &&
++        Eo_FindFloor(play, outPos, 150.0f, &floorY)) {
++        outPos->y = floorY;
++        return true;
++    }
++
++    *outPos = *from;
++    return false;
++}
++
++s32 Eo_PosBehindPlayer(PlayState* play, f32 dist, Vec3f* outPos) {
++    Player* player = GET_PLAYER(play);
++
++    return Eo_PosAround(play, &player->actor.world.pos, player->actor.shape.rot.y + 0x8000, dist, outPos);
++}
++
++void Eo_Puff(PlayState* play, Vec3f* pos, f32 scale) {
++    Vec3f puffPos = *pos;
++
++    puffPos.y += 20.0f * scale;
++    EffectSsDeadDb_Spawn(play, &puffPos, &sEoZeroVec, &sEoZeroVec, (s16)(70.0f * scale), 6, 250, 250, 250, 255, 150,
++                         150, 150, 1, 10, false);
++    SoundSource_PlaySfxAtFixedWorldPos(play, pos, 20, NA_SE_EN_EXTINCT);
++}
++
++void Eo_DarkPuff(PlayState* play, Vec3f* pos, f32 scale) {
++    Vec3f puffPos = *pos;
++    Vec3f accel = { 0.0f, 0.3f, 0.0f };
++    s32 i;
++
++    for (i = 0; i < 3; i++) {
++        puffPos = *pos;
++        puffPos.x += Rand_CenteredFloat(30.0f * scale);
++        puffPos.y += (15.0f + Rand_ZeroFloat(30.0f)) * scale;
++        puffPos.z += Rand_CenteredFloat(30.0f * scale);
++        EffectSsDeadDb_Spawn(play, &puffPos, &sEoZeroVec, &accel, (s16)(60.0f * scale), 8, 170, 110, 230, 255, 40,
++                             0, 70, 1, 12, false);
++    }
++    SoundSource_PlaySfxAtFixedWorldPos(play, pos, 20, NA_SE_EV_FANTOM_WARP_S);
++}
++
++/* ---------------------------------------------------------------------------------------------------------------
++ * Summons
++ * --------------------------------------------------------------------------------------------------------------- */
++
++#define EO_SUMMON_MAX 32
++
++typedef struct EoSummonEntry {
++    Actor* actor;
++    Actor* owner;
++} EoSummonEntry;
++
++static EoSummonEntry sEoSummons[EO_SUMMON_MAX];
++static s32 sEoSpawningExtra = 0; // set while an extra enemy (summon, companion, tag-along) is being spawned
++
++static Actor* Eo_SpawnExtra(PlayState* play, Actor* anchor, s16 actorId, Vec3f* pos, s16 rotY, s16 params) {
++    Actor* actor;
++
++    sEoSpawningExtra++;
++    actor = Actor_Spawn(&play->actorCtx, play, actorId, pos->x, pos->y, pos->z, 0, rotY, 0, params);
++    sEoSpawningExtra--;
++
++    if ((actor != NULL) && (anchor != NULL)) {
++        actor->room = anchor->room;
++    }
++    return actor;
++}
++
++Actor* EoSummon_Spawn(PlayState* play, Actor* owner, s16 actorId, Vec3f* pos, s16 rotY, s16 params) {
++    Actor* actor;
++    s32 i;
++
++    for (i = 0; i < EO_SUMMON_MAX; i++) {
++        if (sEoSummons[i].actor == NULL) {
++            break;
++        }
++    }
++    if (i == EO_SUMMON_MAX) {
++        return NULL;
++    }
++
++    actor = Eo_SpawnExtra(play, owner, actorId, pos, rotY, params);
++    if (actor != NULL) {
++        sEoSummons[i].actor = actor;
++        sEoSummons[i].owner = owner;
++        Eo_Puff(play, pos, 1.5f);
++    }
++    return actor;
++}
++
++s32 EoSummon_Count(Actor* owner) {
++    s32 i;
++    s32 count = 0;
++
++    for (i = 0; i < EO_SUMMON_MAX; i++) {
++        if ((sEoSummons[i].actor != NULL) && (sEoSummons[i].owner == owner) &&
++            (sEoSummons[i].actor->update != NULL)) {
++            count++;
++        }
++    }
++    return count;
++}
++
++s32 EoSummon_IsSummon(Actor* actor) {
++    s32 i;
++
++    for (i = 0; i < EO_SUMMON_MAX; i++) {
++        if ((sEoSummons[i].actor == actor) && (actor->update != NULL)) {
++            return true;
++        }
++    }
++    return false;
++}
++
++void EoSummon_KillAll(Actor* owner, PlayState* play) {
++    s32 i;
++
++    for (i = 0; i < EO_SUMMON_MAX; i++) {
++        if ((sEoSummons[i].actor != NULL) && (sEoSummons[i].owner == owner)) {
++            if (sEoSummons[i].actor->update != NULL) {
++                if (play != NULL) {
++                    Eo_Puff(play, &sEoSummons[i].actor->world.pos, 2.0f);
++                }
++                Actor_Kill(sEoSummons[i].actor);
++            }
++            sEoSummons[i].owner = NULL;
++        }
++    }
++}
++
++/* ---------------------------------------------------------------------------------------------------------------
++ * Regions and Ganon's Reign
++ * --------------------------------------------------------------------------------------------------------------- */
++
++typedef enum EoRegion {
++    /* 0 */ EO_REGION_NONE,
++    /* 1 */ EO_REGION_FIELD,
++    /* 2 */ EO_REGION_FOREST,
++    /* 3 */ EO_REGION_MOUNTAIN,
++    /* 4 */ EO_REGION_WATER,
++    /* 5 */ EO_REGION_DESERT,
++    /* 6 */ EO_REGION_SHADOW, // Kakariko, the graveyard, the well and the Shadow Temple
++    /* 7 */ EO_REGION_CASTLE, // Ganon's Castle and Tower
++} EoRegion;
++
++#define EO_REGION_ANY 0xFF
++
++typedef struct EoSceneInfo {
++    s16 sceneId;
++    u8 region;
++    u8 isDungeon;
++} EoSceneInfo;
++
++static EoSceneInfo sEoScenes[] = {
++    { SCENE_HYRULE_FIELD, EO_REGION_FIELD, false },
++    { SCENE_LAKE_HYLIA, EO_REGION_WATER, false },
++    { SCENE_OUTSIDE_GANONS_CASTLE, EO_REGION_CASTLE, false },
++    { SCENE_KOKIRI_FOREST, EO_REGION_FOREST, false },
++    { SCENE_LOST_WOODS, EO_REGION_FOREST, false },
++    { SCENE_SACRED_FOREST_MEADOW, EO_REGION_FOREST, false },
++    { SCENE_DEKU_TREE, EO_REGION_FOREST, true },
++    { SCENE_FOREST_TEMPLE, EO_REGION_FOREST, true },
++    { SCENE_DEATH_MOUNTAIN_TRAIL, EO_REGION_MOUNTAIN, false },
++    { SCENE_DEATH_MOUNTAIN_CRATER, EO_REGION_MOUNTAIN, false },
++    { SCENE_DODONGOS_CAVERN, EO_REGION_MOUNTAIN, true },
++    { SCENE_FIRE_TEMPLE, EO_REGION_MOUNTAIN, true },
++    { SCENE_ZORAS_RIVER, EO_REGION_WATER, false },
++    { SCENE_ZORAS_FOUNTAIN, EO_REGION_WATER, false },
++    { SCENE_JABU_JABU, EO_REGION_WATER, true },
++    { SCENE_WATER_TEMPLE, EO_REGION_WATER, true },
++    { SCENE_ICE_CAVERN, EO_REGION_WATER, true },
++    { SCENE_GERUDO_VALLEY, EO_REGION_DESERT, false },
++    { SCENE_HAUNTED_WASTELAND, EO_REGION_DESERT, false },
++    { SCENE_DESERT_COLOSSUS, EO_REGION_DESERT, false },
++    { SCENE_SPIRIT_TEMPLE, EO_REGION_DESERT, true },
++    { SCENE_GERUDO_TRAINING_GROUND, EO_REGION_DESERT, true },
++    { SCENE_KAKARIKO_VILLAGE, EO_REGION_SHADOW, false },
++    { SCENE_GRAVEYARD, EO_REGION_SHADOW, false },
++    { SCENE_BOTTOM_OF_THE_WELL, EO_REGION_SHADOW, true },
++    { SCENE_SHADOW_TEMPLE, EO_REGION_SHADOW, true },
++    { SCENE_INSIDE_GANONS_CASTLE, EO_REGION_CASTLE, true },
++    { SCENE_GANONS_TOWER, EO_REGION_CASTLE, true },
++};
++
++static EoSceneInfo* EoScene_Get(PlayState* play) {
++    s32 i;
++
++    for (i = 0; i < ARRAY_COUNT(sEoScenes); i++) {
++        if (sEoScenes[i].sceneId == play->sceneNum) {
++            return &sEoScenes[i];
++        }
++    }
++    return NULL;
++}
++
++// 0 as a child or with the option off, 1 in Ganon's reign (adult Link), 2 in Ganon's reign at night.
++static s32 Eo_ReignLevel(void) {
++    if (!EO_GANONS_REIGN_ON() || !LINK_IS_ADULT) {
++        return 0;
++    }
++    return IS_NIGHT ? 2 : 1;
++}
++
++static s32 Eo_Roll(s32 percent) {
++    percent *= (Eo_ReignLevel() + 1);
++    percent = CLAMP_MAX(percent, 90);
++    return Rand_ZeroFloat(100.0f) < percent;
++}
++
++/* ---------------------------------------------------------------------------------------------------------------
++ * Companions
++ * --------------------------------------------------------------------------------------------------------------- */
++
++#define EO_PARAMS_COPY -1
++
++typedef enum EoPlacement {
++    /* 0 */ EO_PLACE_GROUND, // on the floor, about level with the enemy
++    /* 1 */ EO_PLACE_AIR,    // at the enemy's height (plus the rule's lift), above some floor
++    /* 2 */ EO_PLACE_WATER,  // on the same water surface as the enemy
++} EoPlacement;
++
++typedef struct EoCompanionRule {
++    s16 triggerId;
++    s16 companionId;
++    s32 params; // EO_PARAMS_COPY to copy the trigger's
++    u8 region;  // EO_REGION_ANY or one region
++    u8 chance;  // percent, before Ganon's Reign
++    u8 minCount;
++    u8 maxCount;
++    u8 placement;
++    u8 nightOnly;
++    s16 lift;
++} EoCompanionRule;
++
++static EoCompanionRule sEoCompanionRules[] = {
++    // Their own kind
++    { ACTOR_EN_FIREFLY, ACTOR_EN_FIREFLY, EO_PARAMS_COPY, EO_REGION_ANY, 35, 1, 2, EO_PLACE_AIR, false, 0 },
++    { ACTOR_EN_SKB, ACTOR_EN_SKB, EO_PARAMS_COPY, EO_REGION_ANY, 30, 1, 2, EO_PLACE_GROUND, false, 0 },
++    { ACTOR_EN_TITE, ACTOR_EN_TITE, EO_PARAMS_COPY, EO_REGION_ANY, 30, 1, 1, EO_PLACE_GROUND, false, 0 },
++    { ACTOR_EN_OKUTA, ACTOR_EN_OKUTA, EO_PARAMS_COPY, EO_REGION_ANY, 25, 1, 1, EO_PLACE_WATER, false, 0 },
++    { ACTOR_EN_REEBA, ACTOR_EN_REEBA, EO_PARAMS_COPY, EO_REGION_ANY, 30, 1, 2, EO_PLACE_GROUND, false, 0 },
++    { ACTOR_EN_DEKUBABA, ACTOR_EN_DEKUBABA, EO_PARAMS_COPY, EO_REGION_ANY, 25, 1, 1, EO_PLACE_GROUND, false, 0 },
++    { ACTOR_EN_KAREBABA, ACTOR_EN_KAREBABA, EO_PARAMS_COPY, EO_REGION_ANY, 25, 1, 1, EO_PLACE_GROUND, false, 0 },
++    { ACTOR_EN_CROW, ACTOR_EN_CROW, EO_PARAMS_COPY, EO_REGION_ANY, 40, 1, 2, EO_PLACE_AIR, false, 0 },
++    { ACTOR_EN_POH, ACTOR_EN_POH, EO_PARAMS_COPY, EO_REGION_ANY, 25, 1, 1, EO_PLACE_AIR, false, 0 },
++    { ACTOR_EN_FZ, ACTOR_EN_FZ, EO_PARAMS_COPY, EO_REGION_ANY, 20, 1, 1, EO_PLACE_GROUND, false, 0 },
++    { ACTOR_EN_SB, ACTOR_EN_SB, EO_PARAMS_COPY, EO_REGION_ANY, 25, 1, 1, EO_PLACE_GROUND, false, 0 },
++    { ACTOR_EN_DODOJR, ACTOR_EN_DODOJR, EO_PARAMS_COPY, EO_REGION_ANY, 30, 1, 2, EO_PLACE_GROUND, false, 0 },
++    { ACTOR_EN_NY, ACTOR_EN_NY, EO_PARAMS_COPY, EO_REGION_ANY, 25, 1, 1, EO_PLACE_GROUND, false, 0 },
++    { ACTOR_EN_BILI, ACTOR_EN_BILI, EO_PARAMS_COPY, EO_REGION_ANY, 30, 1, 2, EO_PLACE_AIR, false, 0 },
++    // Creatures that belong where they are found
++    { ACTOR_EN_SKB, ACTOR_EN_FIREFLY, KEESE_NORMAL_FLY, EO_REGION_FIELD, 20, 1, 2, EO_PLACE_AIR, true, 60 },
++    { ACTOR_EN_DEKUBABA, ACTOR_EN_KAREBABA, 0, EO_REGION_FOREST, 20, 1, 1, EO_PLACE_GROUND, false, 0 },
++    { ACTOR_EN_TITE, ACTOR_EN_FIREFLY, KEESE_FIRE_FLY, EO_REGION_MOUNTAIN, 20, 1, 1, EO_PLACE_AIR, false, 80 },
++    { ACTOR_EN_DODOJR, ACTOR_EN_FIREFLY, KEESE_FIRE_FLY, EO_REGION_MOUNTAIN, 20, 1, 1, EO_PLACE_AIR, false, 80 },
++    { ACTOR_EN_FZ, ACTOR_EN_FIREFLY, KEESE_ICE_FLY, EO_REGION_WATER, 25, 1, 2, EO_PLACE_AIR, false, 80 },
++    { ACTOR_EN_REEBA, ACTOR_EN_CROW, 0, EO_REGION_DESERT, 15, 1, 1, EO_PLACE_AIR, false, 120 },
++    { ACTOR_EN_FIREFLY, ACTOR_EN_POH, EN_POH_NORMAL, EO_REGION_SHADOW, 15, 1, 1, EO_PLACE_AIR, true, 20 },
++};
++
++// Variants of an enemy that must not be copied (perched, giant, dummies, special-purpose ones).
++static s32 EoCompanion_CanCopy(Actor* actor) {
++    switch (actor->id) {
++        case ACTOR_EN_FIREFLY:
++            return ((actor->params & 0x7FFF) != KEESE_FIRE_PERCH) && ((actor->params & 0x7FFF) != KEESE_NORMAL_PERCH);
++        case ACTOR_EN_OKUTA:
++            return (actor->params & 0xFF) == 0; // an Octorok, not a projectile
++        case ACTOR_EN_REEBA:
++            return actor->params == LEEVER_SMALL;
++        case ACTOR_EN_POH:
++            return actor->params == EN_POH_NORMAL; // not the composer brothers or the rupee Poe
++        case ACTOR_EN_FZ:
++            return actor->params >= 0;
++        case ACTOR_EN_NY:
++            return actor->params == 0; // not a dummy
++        case ACTOR_EN_BILI:
++            return actor->params == EN_BILI_TYPE_NORMAL; // not one split off a Bari
++        case ACTOR_EN_KAREBABA:
++            return actor->params == 0;
++        default:
++            return true;
++    }
++}
++
++/**
++ * True when defeating every enemy in `room` opens a door, reveals a chest or does something else.
++ */
++static s32 EoRoom_HasClearReward(PlayState* play, s8 room) {
++    s32 category;
++    Actor* actor;
++
++    if (Flags_GetClear(play, room)) {
++        return false;
++    }
++
++    for (category = 0; category < ACTORCAT_MAX; category++) {
++        for (actor = play->actorCtx.actorLists[category].head; actor != NULL; actor = actor->next) {
++            switch (actor->id) {
++                case ACTOR_DOOR_SHUTTER: {
++                    s32 type = (actor->params >> 6) & 0xF;
++
++                    if ((type == 1) || (type == 7)) { // SHUTTER_FRONT_CLEAR, SHUTTER_FRONT_SWITCH_BACK_CLEAR
++                        u16 index = (u16)actor->params >> 10;
++
++                        if ((index >= play->transiActorCtx.numActors) ||
++                            (play->transiActorCtx.list[index].sides[0].room == room) ||
++                            (play->transiActorCtx.list[index].sides[1].room == room)) {
++                            return true;
++                        }
++                    }
++                    break;
++                }
++
++                case ACTOR_EN_BOX: {
++                    s32 type = (actor->params >> 12) & 0xF;
++
++                    if ((actor->room == room) && ((type == 1) || (type == 7))) { // ENBOX_TYPE_ROOM_CLEAR_*
++                        return true;
++                    }
++                    break;
++                }
++
++                case ACTOR_BG_MORI_BIGST:
++                case ACTOR_BG_ICE_SHUTTER:
++                case ACTOR_BG_HIDAN_CURTAIN:
++                case ACTOR_BG_HIDAN_SYOKU:
++                case ACTOR_BG_BDAN_OBJECTS:
++                case ACTOR_EN_BLKOBJ:
++                    if ((actor->room == room) || (actor->room < 0)) {
++                        return true;
++                    }
++                    break;
++
++                default:
++                    break;
++            }
++        }
++    }
++    return false;
++}
++
++/**
++ * Finds a spot 90-170 units from `anchor` with nothing in between. Returns false when every try is blocked.
++ */
++static s32 EoCompanion_FindSpot(PlayState* play, Actor* anchor, u8 placement, s16 lift, Vec3f* out) {
++    s32 try;
++
++    for (try = 0; try < 6; try++) {
++        s16 yaw = (s16)Rand_Next();
++        f32 dist = 90.0f + Rand_ZeroFloat(80.0f);
++        Vec3f from = anchor->world.pos;
++        Vec3f spot = anchor->world.pos;
++        Vec3f hitPos;
++        CollisionPoly* poly;
++        s32 bgId;
++        f32 floorY;
++        f32 surfaceY;
++        WaterBox* waterBox;
++
++        spot.x += Math_SinS(yaw) * dist;
++        spot.z += Math_CosS(yaw) * dist;
++        from.y += 25.0f;
++        spot.y += 25.0f;
++
++        if (BgCheck_EntityLineTest1(&play->colCtx, &from, &spot, &hitPos, &poly, true, false, false, true, &bgId)) {
++            continue;
++        }
++        spot.y -= 25.0f;
++
++        if (placement == EO_PLACE_WATER) {
++            if (!WaterBox_GetSurface1(play, &play->colCtx, spot.x, spot.z, &surfaceY, &waterBox) ||
++                (fabsf(surfaceY - anchor->world.pos.y) > 40.0f)) {
++                continue;
++            }
++            spot.y = anchor->world.pos.y;
++        } else if (placement == EO_PLACE_AIR) {
++            if (!Eo_FindFloor(play, &spot, 900.0f, &floorY)) {
++                continue;
++            }
++            spot.y += lift;
++        } else {
++            if (!Eo_FindFloor(play, &spot, 120.0f, &floorY) || (fabsf(floorY - anchor->world.pos.y) > 60.0f)) {
++                continue;
++            }
++            // Land enemies stay on land
++            if (WaterBox_GetSurface1(play, &play->colCtx, spot.x, spot.z, &surfaceY, &waterBox) &&
++                (surfaceY > floorY + 10.0f)) {
++                continue;
++            }
++            spot.y = floorY;
++        }
++
++        *out = spot;
++        return true;
++    }
++    return false;
++}
++
++static void EoCompanion_Roll(PlayState* play, Actor* actor, EoSceneInfo* scene) {
++    s32 i;
++
++    for (i = 0; i < ARRAY_COUNT(sEoCompanionRules); i++) {
++        EoCompanionRule* rule = &sEoCompanionRules[i];
++        s32 count;
++        s32 n;
++        s32 spawned = false;
++
++        if ((rule->triggerId != actor->id) || ((rule->region != EO_REGION_ANY) && (rule->region != scene->region))) {
++            continue;
++        }
++        if (rule->nightOnly && !IS_NIGHT) {
++            continue;
++        }
++        if (!EoCompanion_CanCopy(actor)) {
++            continue;
++        }
++        // Creatures of other kinds only come along outside dungeons
++        if ((rule->companionId != actor->id) && scene->isDungeon) {
++            continue;
++        }
++        if (!Eo_Roll(rule->chance)) {
++            continue;
++        }
++
++        count = rule->minCount + (s32)Rand_ZeroFloat(rule->maxCount - rule->minCount + 1);
++        count = CLAMP_MAX(count, rule->maxCount);
++        if (Eo_ReignLevel() == 2) {
++            count++;
++        }
++
++        for (n = 0; n < count; n++) {
++            Vec3f spot;
++
++            if (EoCompanion_FindSpot(play, actor, rule->placement, rule->lift, &spot)) {
++                s16 params = (rule->params == EO_PARAMS_COPY) ? actor->params : (s16)rule->params;
++
++                if (Eo_SpawnExtra(play, actor, rule->companionId, &spot, actor->shape.rot.y, params) != NULL) {
++                    spawned = true;
++                }
++            }
++        }
++
++        if (spawned) {
++            return; // one group per enemy
++        }
++    }
++}
++
++/* ---------------------------------------------------------------------------------------------------------------
++ * Tag-alongs for random-encounter spawners
++ * --------------------------------------------------------------------------------------------------------------- */
++
++#define EO_TAG_QUEUE_MAX 6
++#define EO_TAG_ALIVE_MAX 3
++
++typedef struct EoTagAlong {
++    Actor* trigger;
++    s16 delay;
++    s16 actorId;
++    s16 params;
++    u8 placement;
++    s16 lift;
++} EoTagAlong;
++
++static EoTagAlong sEoTagQueue[EO_TAG_QUEUE_MAX];
++static Actor* sEoTagAlive[EO_TAG_ALIVE_MAX];
++
++static s32 EoTag_AliveCount(void) {
++    s32 i;
++    s32 count = 0;
++
++    for (i = 0; i < EO_TAG_ALIVE_MAX; i++) {
++        if ((sEoTagAlive[i] != NULL) && (sEoTagAlive[i]->update != NULL)) {
++            count++;
++        }
++    }
++    return count;
++}
++
++static void EoTag_Queue(Actor* trigger, s16 delay, s16 actorId, s16 params, u8 placement, s16 lift) {
++    s32 i;
++
++    for (i = 0; i < EO_TAG_QUEUE_MAX; i++) {
++        if (sEoTagQueue[i].trigger == NULL) {
++            sEoTagQueue[i].trigger = trigger;
++            sEoTagQueue[i].delay = delay;
++            sEoTagQueue[i].actorId = actorId;
++            sEoTagQueue[i].params = params;
++            sEoTagQueue[i].placement = placement;
++            sEoTagQueue[i].lift = lift;
++            return;
++        }
++    }
++}
++
++static void EoTag_Roll(PlayState* play, Actor* actor) {
++    Actor* spawner = actor->parent;
++
++    if ((spawner == NULL) || (spawner->id != ACTOR_EN_ENCOUNT1) || (EoTag_AliveCount() >= EO_TAG_ALIVE_MAX)) {
++        return;
++    }
++
++    switch (actor->id) {
++        case ACTOR_EN_SKB:
++            // Hyrule Field at night: a second Stalchild claws its way up, or a Keese swoops in
++            if (Eo_Roll(25)) {
++                if (Rand_ZeroOne() < 0.6f) {
++                    EoTag_Queue(actor, 40, ACTOR_EN_SKB, actor->params, EO_PLACE_GROUND, 0);
++                } else {
++                    EoTag_Queue(actor, 40, ACTOR_EN_FIREFLY, KEESE_NORMAL_FLY, EO_PLACE_AIR, 70);
++                }
++            }
++            break;
++
++        case ACTOR_EN_REEBA:
++            if ((actor->params == LEEVER_SMALL) && Eo_Roll(20)) {
++                EoTag_Queue(actor, 30, ACTOR_EN_REEBA, LEEVER_SMALL, EO_PLACE_GROUND, 0);
++            }
++            break;
++
++        case ACTOR_EN_TITE:
++            if (Eo_Roll(25)) {
++                EoTag_Queue(actor, 30, ACTOR_EN_TITE, actor->params, EO_PLACE_GROUND, 0);
++            }
++            break;
++
++        case ACTOR_EN_WF:
++            // Wolfos hunt in pairs
++            if (Eo_Roll(25)) {
++                EoTag_Queue(actor, 60, ACTOR_EN_WF, actor->params, EO_PLACE_GROUND, 0);
++            }
++            break;
++
++        default:
++            break;
++    }
++}
++
++static void EoTag_Update(PlayState* play, Actor* trigger) {
++    s32 i;
++
++    for (i = 0; i < EO_TAG_QUEUE_MAX; i++) {
++        EoTagAlong* tag = &sEoTagQueue[i];
++        Vec3f spot;
++        s32 slot;
++        Actor* spawned;
++
++        if (tag->trigger != trigger) {
++            continue;
++        }
++        if (tag->delay > 0) {
++            tag->delay--;
++            continue;
++        }
++        if (!Eo_CanAttack(play)) {
++            continue;
++        }
++
++        tag->trigger = NULL;
++
++        for (slot = 0; slot < EO_TAG_ALIVE_MAX; slot++) {
++            if ((sEoTagAlive[slot] == NULL) || (sEoTagAlive[slot]->update == NULL)) {
++                break;
++            }
++        }
++        if ((slot == EO_TAG_ALIVE_MAX) || !EoCompanion_FindSpot(play, trigger, tag->placement, tag->lift, &spot)) {
++            continue;
++        }
++
++        spawned = Eo_SpawnExtra(play, NULL, tag->actorId, &spot,
++                                Math_Vec3f_Yaw(&spot, &GET_PLAYER(play)->actor.world.pos), tag->params);
++        if (spawned != NULL) {
++            sEoTagAlive[slot] = spawned;
++        }
++    }
++}
++
++/* ---------------------------------------------------------------------------------------------------------------
++ * Elites
++ * --------------------------------------------------------------------------------------------------------------- */
++
++#define EO_ELITE_MAX 16
++#define EO_ELITE_SCALE 1.25f
++
++typedef struct EoElite {
++    Actor* actor;
++    s16 timer;
++} EoElite;
++
++static EoElite sEoElites[EO_ELITE_MAX];
++static s32 sEoEliteCount = 0;
++
++static s16 sEoEliteIds[] = {
++    ACTOR_EN_FIREFLY, ACTOR_EN_SKB,  ACTOR_EN_TITE,    ACTOR_EN_OKUTA, ACTOR_EN_REEBA,  ACTOR_EN_DEKUBABA,
++    ACTOR_EN_KAREBABA, ACTOR_EN_CROW, ACTOR_EN_POH,    ACTOR_EN_FZ,    ACTOR_EN_SB,     ACTOR_EN_DODOJR,
++    ACTOR_EN_WF,      ACTOR_EN_RD,   ACTOR_EN_RR,      ACTOR_EN_MB,    ACTOR_EN_PEEHAT, ACTOR_EN_DODONGO,
++    ACTOR_EN_BILI,    ACTOR_EN_NY,   ACTOR_EN_ANUBICE, ACTOR_EN_ST,
++};
++
++static s32 EoElite_Find(Actor* actor) {
++    s32 i;
++
++    if (sEoEliteCount == 0) {
++        return -1;
++    }
++    for (i = 0; i < EO_ELITE_MAX; i++) {
++        if (sEoElites[i].actor == actor) {
++            return i;
++        }
++    }
++    return -1;
++}
++
++s32 EoElite_Is(Actor* actor) {
++    return EoElite_Find(actor) >= 0;
++}
++
++static void EoElite_Roll(PlayState* play, Actor* actor) {
++    s32 i;
++    s32 slot = -1;
++    f32 chance = (Eo_ReignLevel() == 2) ? 10.0f : 5.0f;
++
++    for (i = 0; i < ARRAY_COUNT(sEoEliteIds); i++) {
++        if (sEoEliteIds[i] == actor->id) {
++            break;
++        }
++    }
++    if ((i == ARRAY_COUNT(sEoEliteIds)) || !EoCompanion_CanCopy(actor) || (actor->colChkInfo.health == 0) ||
++        (Rand_ZeroFloat(100.0f) >= chance)) {
++        return;
++    }
++
++    for (i = 0; i < EO_ELITE_MAX; i++) {
++        if (sEoElites[i].actor == NULL) {
++            slot = i;
++            break;
++        }
++    }
++    if (slot < 0) {
++        return;
++    }
++
++    sEoElites[slot].actor = actor;
++    sEoElites[slot].timer = 0;
++    sEoEliteCount++;
++    actor->colChkInfo.health = CLAMP_MAX(actor->colChkInfo.health * 2, 250);
++}
++
++static void EoElite_Remove(s32 index) {
++    sEoElites[index].actor = NULL;
++    if (sEoEliteCount > 0) {
++        sEoEliteCount--;
++    }
++}
++
++static void EoElite_Sparkle(PlayState* play, EoElite* elite) {
++    static Color_RGBA8 sPrim = { 255, 255, 180, 255 };
++    static Color_RGBA8 sEnv = { 255, 190, 0, 0 };
++    Actor* actor = elite->actor;
++    Vec3f pos;
++    Vec3f vel = { 0.0f, 0.6f, 0.0f };
++    Vec3f accel = { 0.0f, 0.0f, 0.0f };
++
++    elite->timer++;
++    if ((elite->timer % 6) != 0) {
++        return;
++    }
++
++    pos.x = actor->world.pos.x + Rand_CenteredFloat(40.0f);
++    pos.y = actor->world.pos.y + 10.0f + Rand_ZeroFloat(40.0f);
++    pos.z = actor->world.pos.z + Rand_CenteredFloat(40.0f);
++    EffectSsKiraKira_SpawnDispersed(play, &pos, &vel, &accel, &sPrim, &sEnv, 1500, 16);
++}
++
++/* ---------------------------------------------------------------------------------------------------------------
++ * Hooks
++ * --------------------------------------------------------------------------------------------------------------- */
++
++#define EO_PENDING_MAX 96
++
++static Actor* sEoPending[EO_PENDING_MAX];
++static s32 sEoPendingCount = 0;
++
++static s32 Eo_IsCandidate(s16 id) {
++    s32 i;
++
++    if (id == ACTOR_EN_WF) {
++        return true; // a tag-along trigger
++    }
++    for (i = 0; i < ARRAY_COUNT(sEoCompanionRules); i++) {
++        if (sEoCompanionRules[i].triggerId == id) {
++            return true;
++        }
++    }
++    for (i = 0; i < ARRAY_COUNT(sEoEliteIds); i++) {
++        if (sEoEliteIds[i] == id) {
++            return true;
++        }
++    }
++    return false;
++}
++
++void EnemyOverhaul_OnActorInit(Actor* actor) {
++    s32 i;
++
++    if ((gPlayState == NULL) || (sEoSpawningExtra > 0)) {
++        return; // summons, companions and tag-alongs never bring anyone
++    }
++    if (!EO_ENCOUNTERS_ON() && !EO_ELITES_ON()) {
++        return;
++    }
++    if ((actor->update == NULL) || !Eo_IsCandidate(actor->id)) {
++        return;
++    }
++
++    // Decided on its first update, once the rest of the room (doors, chests) is loaded and its parent is known
++    for (i = 0; i < EO_PENDING_MAX; i++) {
++        if (sEoPending[i] == NULL) {
++            sEoPending[i] = actor;
++            sEoPendingCount++;
++            return;
++        }
++    }
++}
++
++static void Eo_ProcessNewEnemy(PlayState* play, Actor* actor) {
++    EoSceneInfo* scene = EoScene_Get(play);
++
++    if ((scene == NULL) || (actor->update == NULL)) {
++        return;
++    }
++
++    // Enemy Randomizer already reshuffles every spawn; leave its rooms alone
++    if (CVarGetInteger(CVAR_ENHANCEMENT("RandomizedEnemies"), 0)) {
++        return;
++    }
++
++    if (EO_ELITES_ON()) {
++        EoElite_Roll(play, actor);
++    }
++
++    if (!EO_ENCOUNTERS_ON() || (scene->isDungeon && !EO_ENCOUNTERS_DUNGEONS_ON())) {
++        return;
++    }
++
++    if (actor->parent != NULL) {
++        // Spawned by something else: a random-encounter spawner's enemy can get a tag-along
++        EoTag_Roll(play, actor);
++        return;
++    }
++
++    if (EoRoom_HasClearReward(play, actor->room)) {
++        return;
++    }
++
++    EoCompanion_Roll(play, actor, scene);
++}
++
++void EnemyOverhaul_OnActorUpdate(Actor* actor) {
++    PlayState* play = gPlayState;
++    s32 i;
++
++    if (play == NULL) {
++        return;
++    }
++
++    if (sEoPendingCount > 0) {
++        for (i = 0; i < EO_PENDING_MAX; i++) {
++            if (sEoPending[i] == actor) {
++                sEoPending[i] = NULL;
++                sEoPendingCount--;
++                Eo_ProcessNewEnemy(play, actor);
++                break;
++            }
++        }
++    }
++
++    if (sEoEliteCount > 0) {
++        i = EoElite_Find(actor);
++        if (i >= 0) {
++            if (!EO_ELITES_ON()) {
++                EoElite_Remove(i);
++            } else {
++                EoElite_Sparkle(play, &sEoElites[i]);
++            }
++        }
++    }
++
++    for (i = 0; i < EO_TAG_QUEUE_MAX; i++) {
++        if (sEoTagQueue[i].trigger == actor) {
++            EoTag_Update(play, actor);
++            break;
++        }
++    }
++}
++
++void EnemyOverhaul_OnActorPreDraw(Actor* actor) {
++    if ((sEoEliteCount > 0) && (EoElite_Find(actor) >= 0)) {
++        Matrix_Scale(EO_ELITE_SCALE, EO_ELITE_SCALE, EO_ELITE_SCALE, MTXMODE_APPLY);
++    }
++}
++
++void EnemyOverhaul_OnActorKill(Actor* actor) {
++    // ITEM00_FLEXIBLE picks whatever Link is shortest of (hearts, magic, arrows, bombs...)
++    static s16 sEliteDrops[] = { ITEM00_RUPEE_RED, ITEM00_RUPEE_PURPLE, ITEM00_FLEXIBLE, ITEM00_FLEXIBLE };
++    s32 i = EoElite_Find(actor);
++
++    if (i < 0) {
++        return;
++    }
++
++    if ((gPlayState != NULL) && (actor->colChkInfo.health == 0)) {
++        Item_DropCollectible(gPlayState, &actor->world.pos,
++                             sEliteDrops[(s32)Rand_ZeroFloat(ARRAY_COUNT(sEliteDrops)) % ARRAY_COUNT(sEliteDrops)]);
++    }
++    EoElite_Remove(i);
++}
++
++void EnemyOverhaul_OnActorDestroy(Actor* actor) {
++    s32 i;
++
++    EoShot_ForgetOwner(actor);
++
++    for (i = 0; i < EO_SUMMON_MAX; i++) {
++        if (sEoSummons[i].actor == actor) {
++            sEoSummons[i].actor = NULL;
++            sEoSummons[i].owner = NULL;
++        }
++    }
++
++    // Anything this actor summoned goes with it
++    EoSummon_KillAll(actor, NULL);
++
++    for (i = 0; i < EO_SUMMON_MAX; i++) {
++        if ((sEoSummons[i].actor != NULL) && (sEoSummons[i].owner == NULL)) {
++            sEoSummons[i].actor = NULL;
++        }
++    }
++
++    if (sEoPendingCount > 0) {
++        for (i = 0; i < EO_PENDING_MAX; i++) {
++            if (sEoPending[i] == actor) {
++                sEoPending[i] = NULL;
++                sEoPendingCount--;
++            }
++        }
++    }
++
++    i = EoElite_Find(actor);
++    if (i >= 0) {
++        EoElite_Remove(i);
++    }
++
++    for (i = 0; i < EO_TAG_QUEUE_MAX; i++) {
++        if (sEoTagQueue[i].trigger == actor) {
++            sEoTagQueue[i].trigger = NULL;
++        }
++    }
++    for (i = 0; i < EO_TAG_ALIVE_MAX; i++) {
++        if (sEoTagAlive[i] == actor) {
++            sEoTagAlive[i] = NULL;
++        }
++    }
++}
+diff --git a/soh/src/overlays/actors/ovl_En_Am/z_en_am.c b/soh/src/overlays/actors/ovl_En_Am/z_en_am.c
+index e9ceea8..289f08f 100644
+--- a/soh/src/overlays/actors/ovl_En_Am/z_en_am.c
++++ b/soh/src/overlays/actors/ovl_En_Am/z_en_am.c
+@@ -9,6 +9,7 @@
+ #include "overlays/actors/ovl_En_Bom/z_en_bom.h"
+ #include "soh/Enhancements/game-interactor/GameInteractor_Hooks.h"
+ #include "soh/ResourceManagerHelpers.h"
++#include "enemy_overhaul.h"
+ 
+ #define FLAGS                                                                                 \
+     (ACTOR_FLAG_ATTENTION_ENABLED | ACTOR_FLAG_HOSTILE | ACTOR_FLAG_UPDATE_CULLING_DISABLED | \
+@@ -627,6 +628,14 @@ void EnAm_Lunge(EnAm* this, PlayState* play) {
+ 
+                 if (this->dyna.actor.bgCheckFlags & 2) {
+                     this->unk_258--;
++
++                    // Miniboss & Enemy Overhaul: the last hop of a lunge lands hard enough to send out a shockwave
++                    if (EO_ENEMIES_ON() && (this->unk_258 == 0) && (this->deathTimer == 0)) {
++                        Vec3f ringPos = this->dyna.actor.world.pos;
++
++                        ringPos.y = this->dyna.actor.floorHeight;
++                        EoShot_Ring(play, &this->dyna.actor, EO_LOOK_DUST, &ringPos, 120.0f, 5.0f, 0x08);
++                    }
+                 }
+ 
+                 this->dyna.actor.velocity.y = 0.0f;
+diff --git a/soh/src/overlays/actors/ovl_En_Bigokuta/z_en_bigokuta.c b/soh/src/overlays/actors/ovl_En_Bigokuta/z_en_bigokuta.c
+index 368bf86..05b0984 100644
+--- a/soh/src/overlays/actors/ovl_En_Bigokuta/z_en_bigokuta.c
++++ b/soh/src/overlays/actors/ovl_En_Bigokuta/z_en_bigokuta.c
+@@ -2,6 +2,7 @@
+ #include "objects/object_bigokuta/object_bigokuta.h"
+ #include "soh/Enhancements/game-interactor/GameInteractor_Hooks.h"
+ #include "soh/ResourceManagerHelpers.h"
++#include "enemy_overhaul.h"
+ 
+ #define FLAGS                                                                                 \
+     (ACTOR_FLAG_ATTENTION_ENABLED | ACTOR_FLAG_HOSTILE | ACTOR_FLAG_UPDATE_CULLING_DISABLED | \
+@@ -178,6 +179,9 @@ void EnBigokuta_Init(Actor* thisx, PlayState* play) {
+     }
+ 
+     CollisionCheck_SetInfo(&this->actor.colChkInfo, &sDamageTable, sColChkInfoInit);
++    this->actor.colChkInfo.health = EO_HP2(this->actor.colChkInfo.health);
++    this->eoMaxHealth = this->actor.colChkInfo.health;
++    this->eoSpitTimer = 120;
+ 
+     this->unk_194 = 1;
+ 
+@@ -532,6 +536,27 @@ void func_809BDC08(EnBigokuta* this, PlayState* play) {
+     this->actor.shape.rot.y += phi_v1 * this->unk_194;
+     func_809BCE3C(this);
+     func_809BCF68(this, play);
++
++    // Miniboss & Enemy Overhaul: as it circles, it spits jets of water at Link (three at once when badly hurt)
++    if (EO_MB_ATTACKS_ON() && Eo_CanAttack(play)) {
++        if (this->eoSpitTimer > 0) {
++            this->eoSpitTimer--;
++        } else if ((this->actor.xzDistToPlayer > 150.0f) && Actor_IsFacingPlayer(&this->actor, 0x2800)) {
++            Vec3f mouth = this->actor.world.pos;
++
++            mouth.y += 70.0f;
++            mouth.x += Math_SinS(this->actor.shape.rot.y) * 60.0f;
++            mouth.z += Math_CosS(this->actor.shape.rot.y) * 60.0f;
++            if (EO_AT_OR_BELOW(this->actor.colChkInfo.health, this->eoMaxHealth, 1, 2)) {
++                EoShot_OrbFan(play, &this->actor, EO_KIND_WATER, &mouth, 12.0f, 3, 0x1400);
++            } else {
++                EoShot_OrbAimed(play, &this->actor, EO_KIND_WATER, &mouth, 12.0f, 0);
++            }
++            Audio_PlayActorSound2(&this->actor, NA_SE_EN_OCTAROCK_FLOAT);
++            this->eoSpitTimer = 100 + (s16)Rand_ZeroFloat(60.0f);
++        }
++    }
++
+     if (this->unk_198 == 0) {
+         func_809BD768(this);
+     } else if (this->unk_196 == 0) {
+@@ -559,6 +584,10 @@ void func_809BDF34(EnBigokuta* this, PlayState* play) {
+     this->actor.world.pos.y = (sinf(this->unk_196 * (M_PI / 16)) * 100.0f) + this->actor.home.pos.y;
+     if (this->unk_196 == 0) {
+         func_809BD1C8(this, play);
++        // Miniboss & Enemy Overhaul: its belly-flop sends a wave outward (jump it)
++        if (EO_MB_ATTACKS_ON() && Eo_CanAttack(play)) {
++            EoShot_Ring(play, &this->actor, EO_LOOK_WATER, &this->actor.world.pos, 320.0f, 10.0f, 0x08);
++        }
+         func_809BD3F8(this);
+     }
+ }
+diff --git a/soh/src/overlays/actors/ovl_En_Bigokuta/z_en_bigokuta.h b/soh/src/overlays/actors/ovl_En_Bigokuta/z_en_bigokuta.h
+index 83e0d12..49ebcb8 100644
+--- a/soh/src/overlays/actors/ovl_En_Bigokuta/z_en_bigokuta.h
++++ b/soh/src/overlays/actors/ovl_En_Bigokuta/z_en_bigokuta.h
+@@ -22,6 +22,9 @@ typedef struct EnBigokuta {
+     /* 0x028C */ ColliderJntSph collider;
+     /* 0x02AC */ ColliderJntSphElement element;
+     /* 0x02EC */ ColliderCylinder cylinder[2];
+-} EnBigokuta; // size = 0x0384
++    // Miniboss & Enemy Overhaul
++    s16 eoSpitTimer;
++    s16 eoMaxHealth;
++} EnBigokuta;
+ 
+ #endif
+diff --git a/soh/src/overlays/actors/ovl_En_Dekunuts/z_en_dekunuts.c b/soh/src/overlays/actors/ovl_En_Dekunuts/z_en_dekunuts.c
+index 0c7584c..7ab5e68 100644
+--- a/soh/src/overlays/actors/ovl_En_Dekunuts/z_en_dekunuts.c
++++ b/soh/src/overlays/actors/ovl_En_Dekunuts/z_en_dekunuts.c
+@@ -9,6 +9,7 @@
+ #include "objects/object_dekunuts/object_dekunuts.h"
+ #include "soh/Enhancements/game-interactor/GameInteractor_Hooks.h"
+ #include "soh/ResourceManagerHelpers.h"
++#include "enemy_overhaul.h"
+ 
+ #define FLAGS (ACTOR_FLAG_ATTENTION_ENABLED | ACTOR_FLAG_HOSTILE)
+ 
+@@ -316,6 +317,20 @@ void EnDekunuts_ThrowNut(EnDekunuts* this, PlayState* play) {
+         if (Actor_Spawn(&play->actorCtx, play, ACTOR_EN_NUTSBALL, spawnPos.x, spawnPos.y, spawnPos.z,
+                         this->actor.shape.rot.x, this->actor.shape.rot.y, this->actor.shape.rot.z, 0) != NULL) {
+             Audio_PlayActorSound2(&this->actor, NA_SE_EN_NUTS_THROW);
++
++            // Miniboss & Enemy Overhaul: every other spit is a spread of three nuts. They can all be sent back.
++            if (EO_ENEMIES_ON() && ((++this->eoSpitCount % 2) == 0)) {
++                f32 sin = Math_SinS(this->actor.shape.rot.y);
++                f32 cos = Math_CosS(this->actor.shape.rot.y);
++                s32 i;
++
++                // set apart sideways so the nuts don't knock into each other
++                for (i = -1; i <= 1; i += 2) {
++                    Actor_Spawn(&play->actorCtx, play, ACTOR_EN_NUTSBALL, spawnPos.x + (i * 28.0f * cos), spawnPos.y,
++                                spawnPos.z - (i * 28.0f * sin), this->actor.shape.rot.x,
++                                this->actor.shape.rot.y + (i * 0x1000), this->actor.shape.rot.z, 0);
++                }
++            }
+         }
+     } else if ((this->animFlagAndTimer > 1) && Animation_OnFrame(&this->skelAnime, 12.0f)) {
+         Animation_MorphToPlayOnce(&this->skelAnime, &gDekuNutsSpitAnim, -3.0f);
+diff --git a/soh/src/overlays/actors/ovl_En_Dekunuts/z_en_dekunuts.h b/soh/src/overlays/actors/ovl_En_Dekunuts/z_en_dekunuts.h
+index 0418d16..2e002f2 100644
+--- a/soh/src/overlays/actors/ovl_En_Dekunuts/z_en_dekunuts.h
++++ b/soh/src/overlays/actors/ovl_En_Dekunuts/z_en_dekunuts.h
+@@ -20,6 +20,8 @@ typedef struct EnDekunuts {
+     /* 0x019C */ Vec3s jointTable[25];
+     /* 0x0232 */ Vec3s morphTable[25];
+     /* 0x02C8 */ ColliderCylinder collider;
+-} EnDekunuts; // size = 0x0314
++    // Miniboss & Enemy Overhaul
++    u8 eoSpitCount;
++} EnDekunuts;
+ 
+ #endif
+diff --git a/soh/src/overlays/actors/ovl_En_Dh/z_en_dh.c b/soh/src/overlays/actors/ovl_En_Dh/z_en_dh.c
+index f3d9d77..7526edc 100644
+--- a/soh/src/overlays/actors/ovl_En_Dh/z_en_dh.c
++++ b/soh/src/overlays/actors/ovl_En_Dh/z_en_dh.c
+@@ -2,6 +2,7 @@
+ #include "objects/object_dh/object_dh.h"
+ #include "soh/Enhancements/game-interactor/GameInteractor_Hooks.h"
+ #include "soh/ResourceManagerHelpers.h"
++#include "enemy_overhaul.h"
+ 
+ #define FLAGS                                                                                 \
+     (ACTOR_FLAG_ATTENTION_ENABLED | ACTOR_FLAG_HOSTILE | ACTOR_FLAG_UPDATE_CULLING_DISABLED | \
+@@ -151,7 +152,9 @@ void EnDh_Init(Actor* thisx, PlayState* play) {
+     ActorShape_Init(&this->actor.shape, 0.0f, ActorShadow_DrawCircle, 64.0f);
+     this->actor.params = ENDH_WAIT_UNDERGROUND;
+     this->actor.colChkInfo.mass = MASS_HEAVY;
+-    this->actor.colChkInfo.health = LINK_IS_ADULT ? 14 : 20;
++    this->actor.colChkInfo.health = EO_DEAD_HAND_HP(LINK_IS_ADULT ? 14 : 20);
++    this->eoMaxHealth = this->actor.colChkInfo.health;
++    this->eoSpitTimer = 120;
+     this->alpha = this->unk_258 = 255;
+     this->actor.flags &= ~ACTOR_FLAG_ATTENTION_ENABLED;
+     Collider_InitCylinder(play, &this->collider1);
+@@ -233,6 +236,11 @@ void EnDh_Wait(EnDh* this, PlayState* play) {
+                 }
+                 break;
+             case 2:
++                // Miniboss & Enemy Overhaul: he bursts out of the ground with a shockwave (jump it)
++                if (EO_DEAD_HAND_ON() && Eo_CanAttack(play)) {
++                    EoShot_Ring(play, &this->actor, EO_LOOK_DUST, &this->actor.world.pos, 320.0f, 10.0f, 0x10);
++                    Audio_PlayActorSound2(&this->actor, NA_SE_EN_DEADHAND_LAUGH);
++                }
+                 EnDh_SetupWalk(this);
+                 break;
+         }
+@@ -253,7 +261,68 @@ void EnDh_SetupWalk(EnDh* this) {
+     EnDh_SetupAction(this, EnDh_Walk);
+ }
+ 
++/**
++ * Miniboss & Enemy Overhaul: while he stalks Link, Dead Hand spits balls of cursed darkness at him (three at a time
++ * once he's badly hurt, when he also walks faster). He stops and cackles while he gathers each one.
++ * Returns true while he is winding up.
++ */
++s32 EnDh_EoWalkExtras(EnDh* this, PlayState* play) {
++    s32 enraged;
++    Vec3f pos;
++
++    if (!EO_DEAD_HAND_ON() || !Eo_CanAttack(play)) {
++        this->eoSpitCharge = 0;
++        return false;
++    }
++
++    enraged = EO_AT_OR_BELOW(this->actor.colChkInfo.health, this->eoMaxHealth, 1, 2);
++    pos = this->headPos;
++    if (pos.y < this->actor.world.pos.y + 20.0f) {
++        pos = this->actor.world.pos;
++        pos.y += 60.0f;
++    }
++
++    if (this->eoSpitCharge > 0) {
++        this->actor.speedXZ = 0.0f;
++        if ((this->eoSpitCharge % 3) == 0) {
++            Eo_DarkPuff(play, &pos, 0.5f);
++        }
++        this->eoSpitCharge--;
++        if (this->eoSpitCharge == 0) {
++            if (enraged) {
++                EoShot_OrbFan(play, &this->actor, EO_KIND_DARK, &pos, 9.0f, 3, 0x1800);
++            } else {
++                EoShot_OrbAimed(play, &this->actor, EO_KIND_DARK, &pos, 9.0f, 0);
++            }
++            Audio_PlayActorSound2(&this->actor, NA_SE_EN_DEADHAND_BITE);
++            this->eoSpitTimer = enraged ? (70 + (s16)Rand_ZeroFloat(30.0f)) : (100 + (s16)Rand_ZeroFloat(40.0f));
++            this->actor.speedXZ = 1.0f;
++        }
++        return true;
++    }
++
++    if (enraged && (this->actor.speedXZ > 0.0f)) {
++        this->actor.speedXZ = 1.7f;
++    }
++
++    if (this->actor.xzDistToPlayer > 180.0f) {
++        if (this->eoSpitTimer > 0) {
++            this->eoSpitTimer--;
++        } else {
++            this->eoSpitCharge = 20;
++            Audio_PlayActorSound2(&this->actor, NA_SE_EN_DEADHAND_LAUGH);
++        }
++    }
++    return false;
++}
++
+ void EnDh_Walk(EnDh* this, PlayState* play) {
++    if (EnDh_EoWalkExtras(this, play)) {
++        Math_SmoothStepToS(&this->actor.shape.rot.y, this->actor.yawTowardsPlayer, 1, 0x3E8, 0);
++        this->actor.world.rot.y = this->actor.shape.rot.y;
++        SkelAnime_Update(&this->skelAnime);
++        return;
++    }
+     Math_SmoothStepToS(&this->actor.shape.rot.y, this->actor.yawTowardsPlayer, 1, 0xFA, 0);
+     this->actor.world.rot.y = this->actor.shape.rot.y;
+     SkelAnime_Update(&this->skelAnime);
+@@ -493,9 +562,9 @@ void EnDh_CollisionCheck(EnDh* this, PlayState* play) {
+                 EnDh_SetupDeath(this);
+                 Item_DropCollectibleRandom(play, &this->actor, &this->actor.world.pos, 0x90);
+             } else {
+-                if (((lastHealth >= 15) && (this->actor.colChkInfo.health < 15)) ||
+-                    ((lastHealth >= 9) && (this->actor.colChkInfo.health < 9)) ||
+-                    ((lastHealth >= 3) && (this->actor.colChkInfo.health < 3))) {
++                if (((lastHealth >= EO_DEAD_HAND_HP(15)) && (this->actor.colChkInfo.health < EO_DEAD_HAND_HP(15))) ||
++                    ((lastHealth >= EO_DEAD_HAND_HP(9)) && (this->actor.colChkInfo.health < EO_DEAD_HAND_HP(9))) ||
++                    ((lastHealth >= EO_DEAD_HAND_HP(3)) && (this->actor.colChkInfo.health < EO_DEAD_HAND_HP(3)))) {
+ 
+                     this->retreat++;
+                 }
+diff --git a/soh/src/overlays/actors/ovl_En_Dh/z_en_dh.h b/soh/src/overlays/actors/ovl_En_Dh/z_en_dh.h
+index 607b1a9..bd59a10 100644
+--- a/soh/src/overlays/actors/ovl_En_Dh/z_en_dh.h
++++ b/soh/src/overlays/actors/ovl_En_Dh/z_en_dh.h
+@@ -30,7 +30,11 @@ typedef struct EnDh {
+     /* 0x0318 */ f32 dirtWaveSpread;
+     /* 0x031C */ f32 dirtWaveHeight;
+     /* 0x0320 */ f32 dirtWaveAlpha;
+-} EnDh; // size = 0x0324
++    // Miniboss & Enemy Overhaul
++    s16 eoMaxHealth;
++    s16 eoSpitTimer;
++    s16 eoSpitCharge;
++} EnDh;
+ 
+ typedef enum {
+     ENDH_HANDS_KILLED_4 = -4,
+diff --git a/soh/src/overlays/actors/ovl_En_Dha/z_en_dha.c b/soh/src/overlays/actors/ovl_En_Dha/z_en_dha.c
+index 727669a..8a3e6a1 100644
+--- a/soh/src/overlays/actors/ovl_En_Dha/z_en_dha.c
++++ b/soh/src/overlays/actors/ovl_En_Dha/z_en_dha.c
+@@ -8,6 +8,7 @@
+ #include "overlays/actors/ovl_En_Dh/z_en_dh.h"
+ #include "objects/object_dh/object_dh.h"
+ #include "soh/ResourceManagerHelpers.h"
++#include "enemy_overhaul.h"
+ 
+ #define FLAGS (ACTOR_FLAG_ATTENTION_ENABLED | ACTOR_FLAG_HOSTILE | ACTOR_FLAG_UPDATE_CULLING_DISABLED)
+ 
+@@ -23,6 +24,8 @@ void EnDha_TakeDamage(EnDha* this, PlayState* play);
+ void EnDha_SetupDeath(EnDha* this);
+ void EnDha_Die(EnDha* this, PlayState* play);
+ void EnDha_UpdateHealth(EnDha* this, PlayState* play);
++void EnDha_EoSink(EnDha* this, PlayState* play);
++void EnDha_EoRise(EnDha* this, PlayState* play);
+ 
+ const ActorInit En_Dha_InitVars = {
+     ACTOR_EN_DHA,
+@@ -166,6 +169,7 @@ void EnDha_Init(Actor* thisx, PlayState* play) {
+     this->actor.colChkInfo.mass = MASS_HEAVY;
+     this->actor.colChkInfo.health = 8;
+     this->limbAngleX[0] = -0x4000;
++    this->eoSlamTimer = 90 + (s16)Rand_ZeroFloat(90.0f);
+     Collider_InitJntSph(play, &this->collider);
+     Collider_SetJntSph(play, &this->collider, &this->actor, &sJntSphInit, this->colliderItem);
+     this->actor.flags &= ~ACTOR_FLAG_ATTENTION_ENABLED;
+@@ -212,7 +216,8 @@ void EnDha_Wait(EnDha* this, PlayState* play) {
+         playerPos.y += 56.0f;
+     }
+ 
+-    if (this->actor.xzDistToPlayer <= 100.0f) {
++    // Miniboss & Enemy Overhaul: the hands reach for Link from a little further away
++    if (this->actor.xzDistToPlayer <= (EO_DEAD_HAND_ON() ? 125.0f : 100.0f)) {
+         this->handAngle.y = this->handAngle.x = this->limbAngleY = 0;
+ 
+         if (Math_Vec3f_DistXYZ(&playerPos, &this->handPos[0]) <= 12.0f) {
+@@ -380,6 +385,126 @@ void EnDha_Die(EnDha* this, PlayState* play) {
+     }
+ }
+ 
++/**
++ * Miniboss & Enemy Overhaul: Dead Hand's hands.
++ *  - Ground slam: when Link lingers just out of reach, a hand shudders, then sends a tremor along the floor (jump it).
++ *  - Burrowing: when Link keeps well away from a hand, it sinks into the ground and pushes back up close to him.
++ * A hand can't be hurt while it is under the ground, and never moves while it holds Link.
++ */
++static void EnDha_EoReleasePlayer(EnDha* this, PlayState* play) {
++    Player* player = GET_PLAYER(play);
++
++    if ((player->stateFlags2 & PLAYER_STATE2_GRABBED_BY_ENEMY) && (&this->actor == player->actor.parent)) {
++        player->stateFlags2 &= ~PLAYER_STATE2_GRABBED_BY_ENEMY;
++        player->actor.parent = NULL;
++        player->av2.actionVar2 = 200;
++    }
++}
++
++static s32 EnDha_EoFindSpotNearPlayer(EnDha* this, PlayState* play) {
++    Player* player = GET_PLAYER(play);
++    s32 try;
++
++    for (try = 0; try < 6; try++) {
++        Vec3f spot;
++
++        if (Eo_PosAround(play, &player->actor.world.pos, (s16)Rand_Next(), 95.0f + Rand_ZeroFloat(30.0f), &spot) &&
++            (Math_Vec3f_DistXZ(&spot, &this->actor.home.pos) < 700.0f) &&
++            (fabsf(spot.y - this->actor.home.pos.y) < 40.0f)) {
++            this->eoDest = spot;
++            return true;
++        }
++    }
++    return false;
++}
++
++void EnDha_EoSetupSink(EnDha* this) {
++    this->unk_1C0 = 8; // ignores hits while underground
++    this->actionTimer = 0;
++    EnDha_SetupAction(this, EnDha_EoSink);
++}
++
++void EnDha_EoSink(EnDha* this, PlayState* play) {
++    Vec3f pos = this->actor.world.pos;
++
++    EnDha_EoReleasePlayer(this, play);
++    Math_SmoothStepToS(&this->limbAngleX[1], 0, 1, 0x7D0, 0);
++    Math_SmoothStepToS(&this->limbAngleX[0], -0x4000, 1, 0x7D0, 0);
++    SkelAnime_Update(&this->skelAnime);
++
++    if (this->actor.shape.yOffset > -12000.0f) {
++        this->actor.shape.yOffset -= 1000.0f;
++        func_80033480(play, &pos, 7.0f, 1, 0x5A, 0x14, 1);
++    } else {
++        this->actor.world.pos = this->eoDest;
++        this->actor.shape.rot.y = this->actor.yawTowardsPlayer;
++        Audio_PlayActorSound2(&this->actor, NA_SE_EN_DEADHAND_HAND_AT);
++        EnDha_SetupAction(this, EnDha_EoRise);
++    }
++}
++
++void EnDha_EoRise(EnDha* this, PlayState* play) {
++    Vec3f pos = this->actor.world.pos;
++
++    SkelAnime_Update(&this->skelAnime);
++    this->actor.shape.yOffset += 500.0f;
++    func_80033480(play, &pos, 7.0f, 1, 0x5A, 0x14, 1);
++    if (this->actor.shape.yOffset >= 0.0f) {
++        this->actor.shape.yOffset = 0.0f;
++        this->unk_1C0 = 0;
++        this->eoFarTimer = 0;
++        EnDha_SetupWait(this);
++    }
++}
++
++void EnDha_EoExtras(EnDha* this, PlayState* play) {
++    Player* player = GET_PLAYER(play);
++    Vec3f pos;
++
++    if (!EO_DEAD_HAND_ON() || (this->actionFunc != EnDha_Wait) || (this->unk_1C0 >= 8) ||
++        (this->actor.parent == NULL) || (this->actor.parent->params == ENDH_DEATH) || !Eo_CanAttack(play) ||
++        ((player->stateFlags2 & PLAYER_STATE2_GRABBED_BY_ENEMY) && (&this->actor == player->actor.parent))) {
++        this->eoSlamCharge = 0;
++        return;
++    }
++
++    if (this->eoSlamCharge > 0) {
++        this->eoSlamCharge--;
++        if ((this->eoSlamCharge % 3) == 0) {
++            pos = this->actor.world.pos;
++            pos.x += Rand_CenteredFloat(40.0f);
++            pos.z += Rand_CenteredFloat(40.0f);
++            func_80033480(play, &pos, 10.0f, 1, 0x5A, 0x14, 1);
++        }
++        if (this->eoSlamCharge == 0) {
++            EoShot_Ring(play, &this->actor, EO_LOOK_DUST, &this->actor.world.pos, 240.0f, 9.0f, 0x08);
++            Audio_PlayActorSound2(&this->actor, NA_SE_EN_DEADHAND_GRIP);
++            this->eoSlamTimer = 150 + (s16)Rand_ZeroFloat(90.0f);
++        }
++        return;
++    }
++
++    if ((this->actor.xzDistToPlayer > 125.0f) && (this->actor.xzDistToPlayer < 230.0f)) {
++        if (this->eoSlamTimer > 0) {
++            this->eoSlamTimer--;
++        } else {
++            this->eoSlamCharge = 18;
++            Audio_PlayActorSound2(&this->actor, NA_SE_EN_DEADHAND_HAND_AT);
++        }
++    }
++
++    if (this->actor.xzDistToPlayer > 300.0f) {
++        this->eoFarTimer++;
++        if ((this->eoFarTimer > 150) && EnDha_EoFindSpotNearPlayer(this, play)) {
++            EnDha_EoSetupSink(this);
++        } else if (this->eoFarTimer > 150) {
++            this->eoFarTimer = 100; // try again in a moment
++        }
++    } else {
++        this->eoFarTimer = 0;
++    }
++}
++
+ void EnDha_UpdateHealth(EnDha* this, PlayState* play) {
+     if (!((this->unk_1C0 >= 8) || !(this->collider.base.acFlags & AC_HIT))) {
+         this->collider.base.acFlags &= ~AC_HIT;
+@@ -415,6 +540,7 @@ void EnDha_Update(Actor* thisx, PlayState* play) {
+ 
+     EnDha_UpdateHealth(this, play);
+     this->actionFunc(this, play);
++    EnDha_EoExtras(this, play);
+     CollisionCheck_SetAC(play, &play->colChkCtx, &this->collider.base);
+     CollisionCheck_SetOC(play, &play->colChkCtx, &this->collider.base);
+ }
+diff --git a/soh/src/overlays/actors/ovl_En_Dha/z_en_dha.h b/soh/src/overlays/actors/ovl_En_Dha/z_en_dha.h
+index b121901..bc780b2 100644
+--- a/soh/src/overlays/actors/ovl_En_Dha/z_en_dha.h
++++ b/soh/src/overlays/actors/ovl_En_Dha/z_en_dha.h
+@@ -25,6 +25,11 @@ typedef struct EnDha {
+     /* 0x01F4 */ Vec3f armPos;
+     /* 0x0200 */ ColliderJntSph collider;
+     /* 0x0220 */ ColliderJntSphElement colliderItem[5];
+-} EnDha; // size = 0x0360
++    // Miniboss & Enemy Overhaul
++    s16 eoSlamTimer;
++    s16 eoSlamCharge;
++    s16 eoFarTimer;
++    Vec3f eoDest;
++} EnDha;
+ 
+ #endif
+diff --git a/soh/src/overlays/actors/ovl_En_Eo_Shot/z_en_eo_shot.c b/soh/src/overlays/actors/ovl_En_Eo_Shot/z_en_eo_shot.c
+new file mode 100644
+index 0000000..889f12c
+--- /dev/null
++++ b/soh/src/overlays/actors/ovl_En_Eo_Shot/z_en_eo_shot.c
+@@ -0,0 +1,880 @@
++/*
++ * File: z_en_eo_shot.c
++ * Overlay: ovl_En_Eo_Shot (custom actor, registered in the ActorDB)
++ * Description: Miniboss & Enemy Overhaul projectiles: orbs, ground waves, shockwave rings, thrown weapons and
++ *              falling rocks. Everything is drawn with gameplay_keep's glow and the owners' own models.
++ */
++
++#include "z_en_eo_shot.h"
++#include "objects/gameplay_keep/gameplay_keep.h"
++
++#define FLAGS (ACTOR_FLAG_UPDATE_CULLING_DISABLED | ACTOR_FLAG_DRAW_CULLING_DISABLED)
++
++s16 gEnEoShotId = -1;
++
++#define EO_SHOT_MAX 96
++
++static EnEoShot* sEoShots[EO_SHOT_MAX];
++
++typedef struct EoKindInfo {
++    u8 effect;  // 0 none, 1 fire, 2 ice, 3 shock, 4 knockback
++    u8 damage;  // 0x10 is one heart
++    s16 radius; // hitbox
++    s16 life;
++    f32 drawScale;
++    Color_RGB8 prim;
++    Color_RGB8 env;
++} EoKindInfo;
++
++static EoKindInfo sEoKindInfo[EO_KIND_MAX] = {
++    /* EO_KIND_FIRE  */ { 1, 0x10, 20, 110, 0.045f, { 255, 230, 140 }, { 255, 70, 0 } },
++    /* EO_KIND_ICE   */ { 2, 0x10, 20, 110, 0.045f, { 235, 250, 255 }, { 70, 160, 255 } },
++    /* EO_KIND_SHOCK */ { 3, 0x10, 20, 110, 0.045f, { 255, 255, 210 }, { 120, 150, 255 } },
++    /* EO_KIND_DARK  */ { 0, 0x10, 20, 120, 0.050f, { 230, 170, 255 }, { 110, 0, 170 } },
++    /* EO_KIND_LIGHT */ { 0, 0x10, 22, 120, 0.055f, { 255, 255, 235 }, { 255, 220, 90 } },
++    /* EO_KIND_WATER */ { 4, 0x08, 20, 90, 0.045f, { 220, 245, 255 }, { 40, 120, 255 } },
++    /* EO_KIND_EMBER */ { 1, 0x08, 16, 28, 0.030f, { 255, 210, 110 }, { 255, 40, 0 } },
++    /* EO_KIND_MUD   */ { 0, 0x08, 18, 90, 0.040f, { 205, 170, 120 }, { 90, 60, 20 } },
++};
++
++static ColliderCylinderInit sCylinderInit = {
++    {
++        COLTYPE_NONE,
++        AT_ON | AT_TYPE_ENEMY,
++        AC_NONE,
++        OC1_NONE,
++        OC2_TYPE_1,
++        COLSHAPE_CYLINDER,
++    },
++    {
++        ELEMTYPE_UNK0,
++        { 0xFFCFFFFF, 0x00, 0x10 },
++        { 0x00000000, 0x00, 0x00 },
++        TOUCH_ON | TOUCH_SFX_NORMAL,
++        BUMP_NONE,
++        OCELEM_NONE,
++    },
++    { 20, 40, -20, { 0, 0, 0 } },
++};
++
++/* ---------------------------------------------------------------------------------------------------------------
++ * Actor
++ * --------------------------------------------------------------------------------------------------------------- */
++
++void EnEoShot_Init(Actor* thisx, PlayState* play) {
++    EnEoShot* this = (EnEoShot*)thisx;
++    s32 i;
++
++    Collider_InitCylinder(play, &this->collider);
++    Collider_SetCylinder(play, &this->collider, &this->actor, &sCylinderInit);
++    this->actor.flags &= ~(ACTOR_FLAG_ATTENTION_ENABLED | ACTOR_FLAG_HOSTILE);
++    this->actor.room = -1; // follows Link through room changes instead of being unloaded mid-flight
++    this->actor.gravity = 0.0f;
++    this->actor.shape.shadowDraw = NULL;
++    this->dListScale = 1.0f;
++    this->drawScale = 0.045f;
++    this->maxLife = this->life = 110;
++    this->spin = (s16)Rand_Next();
++    Actor_SetScale(&this->actor, 0.01f);
++
++    for (i = 0; i < EO_SHOT_MAX; i++) {
++        if (sEoShots[i] == NULL) {
++            sEoShots[i] = this;
++            return;
++        }
++    }
++    // The table is full: this one simply never gets an owner cleared, so it gives up its owner right away
++    this->owner = NULL;
++}
++
++void EnEoShot_Destroy(Actor* thisx, PlayState* play) {
++    EnEoShot* this = (EnEoShot*)thisx;
++    s32 i;
++
++    Collider_DestroyCylinder(play, &this->collider);
++    for (i = 0; i < EO_SHOT_MAX; i++) {
++        if (sEoShots[i] == this) {
++            sEoShots[i] = NULL;
++        }
++    }
++}
++
++static s32 EoShot_IsRegistered(EnEoShot* shot) {
++    s32 i;
++
++    for (i = 0; i < EO_SHOT_MAX; i++) {
++        if (sEoShots[i] == shot) {
++            return true;
++        }
++    }
++    return false;
++}
++
++void EoShot_ForgetOwner(Actor* actor) {
++    s32 i;
++
++    for (i = 0; i < EO_SHOT_MAX; i++) {
++        if ((sEoShots[i] != NULL) && (sEoShots[i]->owner == actor)) {
++            sEoShots[i]->owner = NULL;
++        }
++    }
++}
++
++s32 EoShot_CountOwned(Actor* owner, s32 mode) {
++    s32 i;
++    s32 count = 0;
++
++    for (i = 0; i < EO_SHOT_MAX; i++) {
++        if ((sEoShots[i] != NULL) && (sEoShots[i]->owner == owner) && (sEoShots[i]->mode == mode) &&
++            (sEoShots[i]->actor.update != NULL)) {
++            count++;
++        }
++    }
++    return count;
++}
++
++static EnEoShot* EoShot_Spawn(PlayState* play, Actor* owner, s32 mode, s32 kind, Vec3f* pos) {
++    EnEoShot* shot;
++    EoKindInfo* info;
++
++    if ((play == NULL) || (pos == NULL) || (gEnEoShotId < 0)) {
++        return NULL;
++    }
++
++    shot = (EnEoShot*)Actor_Spawn(&play->actorCtx, play, gEnEoShotId, pos->x, pos->y, pos->z, 0, 0, 0, mode);
++    if (shot == NULL) {
++        return NULL;
++    }
++
++    if ((kind < 0) || (kind >= EO_KIND_MAX)) {
++        kind = EO_KIND_FIRE;
++    }
++    info = &sEoKindInfo[kind];
++
++    shot->owner = EoShot_IsRegistered(shot) ? owner : NULL;
++    shot->mode = mode;
++    shot->kind = kind;
++    shot->maxLife = shot->life = info->life;
++    shot->drawScale = info->drawScale;
++    shot->collider.dim.radius = info->radius;
++    shot->collider.dim.height = info->radius * 2;
++    shot->collider.dim.yShift = -info->radius;
++    shot->collider.info.toucher.damage = info->damage;
++    shot->collider.info.toucher.effect = info->effect;
++    shot->actor.prevPos = *pos;
++    return shot;
++}
++
++static void EoShot_SetHitbox(EnEoShot* shot, s16 radius, s16 height, s16 yShift, u8 damage, u8 effect) {
++    shot->collider.dim.radius = radius;
++    shot->collider.dim.height = height;
++    shot->collider.dim.yShift = yShift;
++    shot->collider.info.toucher.damage = damage;
++    shot->collider.info.toucher.effect = effect;
++}
++
++void EoShot_SetHoming(Actor* shot, s16 step) {
++    if (shot != NULL) {
++        ((EnEoShot*)shot)->homing = step;
++    }
++}
++
++void EoShot_SetDamage(Actor* shot, u8 damage, u8 effect) {
++    if (shot != NULL) {
++        ((EnEoShot*)shot)->collider.info.toucher.damage = damage;
++        ((EnEoShot*)shot)->collider.info.toucher.effect = effect;
++    }
++}
++
++/* ---------------------------------------------------------------------------------------------------------------
++ * Firing
++ * --------------------------------------------------------------------------------------------------------------- */
++
++void Eo_PlayerAimPoint(PlayState* play, Vec3f* out) {
++    Player* player = GET_PLAYER(play);
++
++    *out = player->actor.world.pos;
++    out->y += LINK_IS_ADULT ? 35.0f : 22.0f;
++}
++
++static void EoShot_AimVelocity(Vec3f* from, Vec3f* to, f32 speed, s16 yawOffset, Vec3f* outVel) {
++    f32 dx = to->x - from->x;
++    f32 dy = to->y - from->y;
++    f32 dz = to->z - from->z;
++    f32 dist = sqrtf(SQ(dx) + SQ(dy) + SQ(dz));
++    f32 cosOff = Math_CosS(yawOffset);
++    f32 sinOff = Math_SinS(yawOffset);
++
++    if (dist < 1.0f) {
++        outVel->x = 0.0f;
++        outVel->y = 0.0f;
++        outVel->z = speed;
++        return;
++    }
++    dx = (dx / dist) * speed;
++    dy = (dy / dist) * speed;
++    dz = (dz / dist) * speed;
++    outVel->x = (dx * cosOff) + (dz * sinOff);
++    outVel->y = dy;
++    outVel->z = (dz * cosOff) - (dx * sinOff);
++}
++
++Actor* EoShot_Orb(PlayState* play, Actor* owner, s32 kind, Vec3f* pos, Vec3f* vel) {
++    EnEoShot* shot = EoShot_Spawn(play, owner, EO_SHOT_ORB, kind, pos);
++
++    if (shot == NULL) {
++        return NULL;
++    }
++    shot->actor.velocity = *vel;
++    shot->actor.world.rot.y = shot->actor.shape.rot.y = Math_Atan2S(vel->z, vel->x);
++    return &shot->actor;
++}
++
++Actor* EoShot_OrbAimed(PlayState* play, Actor* owner, s32 kind, Vec3f* pos, f32 speed, s16 yawOffset) {
++    Vec3f target;
++    Vec3f vel;
++
++    Eo_PlayerAimPoint(play, &target);
++    EoShot_AimVelocity(pos, &target, speed, yawOffset, &vel);
++    return EoShot_Orb(play, owner, kind, pos, &vel);
++}
++
++void EoShot_OrbFan(PlayState* play, Actor* owner, s32 kind, Vec3f* pos, f32 speed, s32 count, s16 spread) {
++    s32 i;
++
++    for (i = 0; i < count; i++) {
++        EoShot_OrbAimed(play, owner, kind, pos, speed, (s16)(((i * 2) - (count - 1)) * spread / 2));
++    }
++}
++
++void EoShot_OrbRing(PlayState* play, Actor* owner, s32 kind, Vec3f* pos, f32 speed, s32 count, s16 baseYaw) {
++    Vec3f vel;
++    s32 i;
++
++    for (i = 0; i < count; i++) {
++        s16 yaw = baseYaw + (s16)(i * (0x10000 / count));
++
++        vel.x = Math_SinS(yaw) * speed;
++        vel.y = 0.0f;
++        vel.z = Math_CosS(yaw) * speed;
++        EoShot_Orb(play, owner, kind, pos, &vel);
++    }
++}
++
++Actor* EoShot_OrbLob(PlayState* play, Actor* owner, s32 kind, Vec3f* pos, Vec3f* to, f32 frames) {
++    Vec3f vel;
++    Actor* shot;
++    const f32 gravity = -1.0f;
++
++    if (frames < 1.0f) {
++        frames = 1.0f;
++    }
++    vel.x = (to->x - pos->x) / frames;
++    vel.z = (to->z - pos->z) / frames;
++    // y(t) = vy * t + gravity * t * (t + 1) / 2 (velocity is applied after gravity each frame)
++    vel.y = ((to->y - pos->y) - (gravity * frames * (frames + 1.0f) * 0.5f)) / frames;
++
++    shot = EoShot_Orb(play, owner, kind, pos, &vel);
++    if (shot != NULL) {
++        ((EnEoShot*)shot)->gravity = gravity;
++        ((EnEoShot*)shot)->maxLife = ((EnEoShot*)shot)->life = (s16)frames + 30;
++    }
++    return shot;
++}
++
++Actor* EoShot_GroundWave(PlayState* play, Actor* owner, s32 look, Vec3f* pos, s16 yaw, f32 speed, s16 life,
++                         u8 damage) {
++    EnEoShot* shot = EoShot_Spawn(play, owner, EO_SHOT_GROUND_WAVE, EO_KIND_EMBER, pos);
++
++    if (shot == NULL) {
++        return NULL;
++    }
++    shot->look = look;
++    shot->damage = damage;
++    shot->speed = speed;
++    shot->timer = life;
++    shot->actor.world.rot.y = yaw;
++    shot->actor.velocity.x = Math_SinS(yaw) * speed;
++    shot->actor.velocity.z = Math_CosS(yaw) * speed;
++    shot->actor.floorHeight = pos->y;
++    EoShot_SetHitbox(shot, 26, 45, 0, damage,
++                     (look == EO_LOOK_FIRE) ? 1 : ((look == EO_LOOK_ICE) ? 2 : ((look == EO_LOOK_WATER) ? 4 : 0)));
++    return &shot->actor;
++}
++
++void EoShot_GroundWaveFan(PlayState* play, Actor* owner, s32 look, Vec3f* pos, s32 count, s16 spread, f32 speed,
++                          s16 life, u8 damage) {
++    Player* player = GET_PLAYER(play);
++    s16 yaw = Math_Vec3f_Yaw(pos, &player->actor.world.pos);
++    s32 i;
++
++    for (i = 0; i < count; i++) {
++        EoShot_GroundWave(play, owner, look, pos, yaw + (s16)(((i * 2) - (count - 1)) * spread / 2), speed, life,
++                          damage);
++    }
++}
++
++Actor* EoShot_Ring(PlayState* play, Actor* owner, s32 look, Vec3f* pos, f32 radiusMax, f32 radiusStep, u8 damage) {
++    EnEoShot* shot = EoShot_Spawn(play, owner, EO_SHOT_RING, EO_KIND_EMBER, pos);
++
++    if (shot == NULL) {
++        return NULL;
++    }
++    shot->look = look;
++    shot->damage = damage;
++    shot->radius = 20.0f;
++    shot->radiusMax = radiusMax;
++    shot->radiusStep = radiusStep;
++    shot->actor.floorHeight = pos->y;
++    return &shot->actor;
++}
++
++Actor* EoShot_Boomerang(PlayState* play, Actor* owner, Gfx* dList, f32 scale, Vec3f* pos, s16 yaw, f32 speed,
++                        u8 damage) {
++    EnEoShot* shot = EoShot_Spawn(play, owner, EO_SHOT_BOOMERANG, EO_KIND_EMBER, pos);
++
++    if (shot == NULL) {
++        return NULL;
++    }
++    shot->dList = dList;
++    shot->dListScale = scale;
++    shot->speed = speed;
++    shot->damage = damage;
++    shot->spinStep = 0x2400;
++    shot->actor.world.rot.y = yaw;
++    EoShot_SetHitbox(shot, 34, 34, -17, damage, 0);
++    return &shot->actor;
++}
++
++Actor* EoShot_Falling(PlayState* play, Actor* owner, Gfx* dList, f32 scale, Vec3f* spot, f32 height, u8 damage) {
++    Vec3f pos = *spot;
++    EnEoShot* shot;
++
++    pos.y += height;
++    shot = EoShot_Spawn(play, owner, EO_SHOT_FALLING, EO_KIND_EMBER, &pos);
++    if (shot == NULL) {
++        return NULL;
++    }
++    shot->dList = dList;
++    shot->dListScale = scale;
++    shot->damage = damage;
++    shot->target = *spot;
++    shot->spinStep = (s16)Rand_CenteredFloat(0x1800);
++    return &shot->actor;
++}
++
++Actor* EoShot_FallingOrb(PlayState* play, Actor* owner, s32 kind, Vec3f* spot, f32 height, u8 damage) {
++    Vec3f pos = *spot;
++    EnEoShot* shot;
++
++    pos.y += height;
++    shot = EoShot_Spawn(play, owner, EO_SHOT_FALLING, kind, &pos);
++    if (shot == NULL) {
++        return NULL;
++    }
++    shot->dList = NULL; // drawn as an orb
++    shot->damage = damage;
++    shot->target = *spot;
++    return &shot->actor;
++}
++
++/* ---------------------------------------------------------------------------------------------------------------
++ * Effects
++ * --------------------------------------------------------------------------------------------------------------- */
++
++static void EoShot_Dust(PlayState* play, Vec3f* pos, s16 scale) {
++    Vec3f vel = { 0.0f, 1.0f, 0.0f };
++    Vec3f accel = { 0.0f, 0.3f, 0.0f };
++
++    func_8002865C(play, pos, &vel, &accel, scale, 15);
++}
++
++static void EoShot_LookPuff(PlayState* play, s32 look, Vec3f* pos, f32 scale) {
++    static Color_RGBA8 sIcePrim = { 240, 250, 255, 255 };
++    static Color_RGBA8 sIceEnv = { 150, 200, 255, 255 };
++    Vec3f vel = { 0.0f, 0.0f, 0.0f };
++    Vec3f accel = { 0.0f, 0.4f, 0.0f };
++
++    switch (look) {
++        case EO_LOOK_FIRE:
++            EffectSsKFire_Spawn(play, pos, &vel, &accel, (s16)(18.0f * scale), 0);
++            break;
++
++        case EO_LOOK_ICE:
++            vel.y = 1.0f;
++            func_8002836C(play, pos, &vel, &accel, &sIcePrim, &sIceEnv, (s16)(120.0f * scale), 15, 10);
++            break;
++
++        case EO_LOOK_WATER:
++            EffectSsGSplash_Spawn(play, pos, NULL, NULL, 0, (s16)(160.0f * scale));
++            break;
++
++        case EO_LOOK_DARK:
++            EffectSsDeadDb_Spawn(play, pos, &vel, &accel, (s16)(70.0f * scale), 10, 200, 130, 255, 255, 60, 0, 90,
++                                 1, 9, false);
++            break;
++
++        default:
++            EoShot_Dust(play, pos, (s16)(120.0f * scale));
++            break;
++    }
++}
++
++// A trail particle behind an orb.
++static void EoShot_Trail(PlayState* play, EnEoShot* this) {
++    EoKindInfo* info = &sEoKindInfo[this->kind];
++    Vec3f pos = this->actor.world.pos;
++    Vec3f vel = { 0.0f, 0.0f, 0.0f };
++    Vec3f accel = { 0.0f, 0.0f, 0.0f };
++    Color_RGBA8 prim = { info->prim.r, info->prim.g, info->prim.b, 255 };
++    Color_RGBA8 env = { info->env.r, info->env.g, info->env.b, 0 };
++
++    pos.x += Rand_CenteredFloat(8.0f);
++    pos.y += Rand_CenteredFloat(8.0f);
++    pos.z += Rand_CenteredFloat(8.0f);
++
++    switch (this->kind) {
++        case EO_KIND_FIRE:
++        case EO_KIND_EMBER:
++            accel.y = 0.3f;
++            EffectSsKFire_Spawn(play, &pos, &vel, &accel, (this->kind == EO_KIND_EMBER) ? 8 : 12, 0);
++            break;
++
++        case EO_KIND_ICE:
++        case EO_KIND_LIGHT:
++            accel.y = -0.1f;
++            EffectSsKiraKira_SpawnDispersed(play, &pos, &vel, &accel, &prim, &env, 1200, 12);
++            break;
++
++        case EO_KIND_SHOCK:
++            if ((this->timer % 4) == 0) {
++                EffectSsGSpk_SpawnNoAccel(play, NULL, &pos, &vel, &accel, &prim, &env, 100, 0);
++            }
++            break;
++
++        case EO_KIND_DARK:
++            accel.y = 0.2f;
++            EffectSsDeadDb_Spawn(play, &pos, &vel, &accel, 30, 6, 200, 130, 255, 255, 60, 0, 90, 1, 7, false);
++            break;
++
++        case EO_KIND_WATER:
++            if ((this->timer % 3) == 0) {
++                EffectSsBubble_Spawn(play, &pos, 0.0f, 5.0f, 5.0f, 0.08f);
++            }
++            break;
++
++        default:
++            if ((this->timer % 3) == 0) {
++                EoShot_Dust(play, &pos, 60);
++            }
++            break;
++    }
++}
++
++// The burst when an orb hits something or runs out.
++static void EoShot_Burst(PlayState* play, EnEoShot* this) {
++    EoKindInfo* info = &sEoKindInfo[this->kind];
++    Vec3f pos = this->actor.world.pos;
++    Vec3f vel = { 0.0f, 0.0f, 0.0f };
++    Vec3f accel = { 0.0f, 0.0f, 0.0f };
++    Color_RGBA8 prim = { info->prim.r, info->prim.g, info->prim.b, 255 };
++    Color_RGBA8 env = { info->env.r, info->env.g, info->env.b, 255 };
++    s32 i;
++
++    switch (this->kind) {
++        case EO_KIND_FIRE:
++        case EO_KIND_EMBER:
++            for (i = 0; i < 3; i++) {
++                vel.x = Rand_CenteredFloat(3.0f);
++                vel.y = Rand_ZeroFloat(2.0f);
++                vel.z = Rand_CenteredFloat(3.0f);
++                accel.y = 0.3f;
++                EffectSsKFire_Spawn(play, &pos, &vel, &accel, (this->kind == EO_KIND_EMBER) ? 10 : 20, 0);
++            }
++            SoundSource_PlaySfxAtFixedWorldPos(play, &pos, 20, NA_SE_EV_FLAME_IGNITION);
++            break;
++
++        case EO_KIND_ICE:
++            EffectSsIceSmoke_Spawn(play, &pos, &vel, &accel, 150);
++            SoundSource_PlaySfxAtFixedWorldPos(play, &pos, 20, NA_SE_EV_ICE_BROKEN);
++            break;
++
++        case EO_KIND_SHOCK:
++            for (i = 0; i < 4; i++) {
++                vel.x = Rand_CenteredFloat(6.0f);
++                vel.y = Rand_ZeroFloat(4.0f);
++                vel.z = Rand_CenteredFloat(6.0f);
++                EffectSsGSpk_SpawnNoAccel(play, NULL, &pos, &vel, &accel, &prim, &env, 100, 0);
++            }
++            SoundSource_PlaySfxAtFixedWorldPos(play, &pos, 20, NA_SE_EN_BIRI_SPARK);
++            break;
++
++        case EO_KIND_DARK:
++            EffectSsDeadDb_Spawn(play, &pos, &vel, &accel, 90, 10, 200, 130, 255, 255, 60, 0, 90, 1, 10, false);
++            SoundSource_PlaySfxAtFixedWorldPos(play, &pos, 20, NA_SE_EN_EXTINCT);
++            break;
++
++        case EO_KIND_LIGHT:
++            EffectSsKiraKira_SpawnDispersed(play, &pos, &vel, &accel, &prim, &env, 3000, 16);
++            SoundSource_PlaySfxAtFixedWorldPos(play, &pos, 20, NA_SE_EN_LIGHT_ARROW_HIT);
++            break;
++
++        case EO_KIND_WATER:
++            EffectSsGSplash_Spawn(play, &pos, NULL, NULL, 0, 250);
++            SoundSource_PlaySfxAtFixedWorldPos(play, &pos, 20, NA_SE_EV_BOMB_DROP_WATER);
++            break;
++
++        default:
++            for (i = 0; i < 3; i++) {
++                EoShot_Dust(play, &pos, 150);
++            }
++            SoundSource_PlaySfxAtFixedWorldPos(play, &pos, 20, NA_SE_EV_LAND_DIRT);
++            break;
++    }
++}
++
++/* ---------------------------------------------------------------------------------------------------------------
++ * Update
++ * --------------------------------------------------------------------------------------------------------------- */
++
++static void EoShot_UpdateOrb(EnEoShot* this, PlayState* play) {
++    Actor* actor = &this->actor;
++    Vec3f from = actor->world.pos;
++    Vec3f hitPos;
++    CollisionPoly* poly;
++    s32 bgId;
++
++    if ((this->homing != 0) && Eo_CanAttack(play)) {
++        Vec3f target;
++        f32 speedXZ = sqrtf(SQ(actor->velocity.x) + SQ(actor->velocity.z));
++        s16 yaw = Math_Atan2S(actor->velocity.z, actor->velocity.x);
++
++        Eo_PlayerAimPoint(play, &target);
++        Math_ScaledStepToS(&yaw, Math_Vec3f_Yaw(&actor->world.pos, &target), this->homing);
++        actor->velocity.x = Math_SinS(yaw) * speedXZ;
++        actor->velocity.z = Math_CosS(yaw) * speedXZ;
++        Math_StepToF(&actor->velocity.y, (target.y - actor->world.pos.y) * 0.08f, 0.5f);
++    }
++
++    actor->velocity.y += this->gravity;
++    actor->world.pos.x += actor->velocity.x;
++    actor->world.pos.y += actor->velocity.y;
++    actor->world.pos.z += actor->velocity.z;
++    this->spin += 0x1000;
++
++    if ((this->timer % 2) == 0) {
++        EoShot_Trail(play, this);
++    }
++
++    // Walls, floors and ceilings put it out
++    if (BgCheck_EntityLineTest1(&play->colCtx, &from, &actor->world.pos, &hitPos, &poly, true, true, true, true,
++                                &bgId)) {
++        actor->world.pos = hitPos;
++        this->life = 0;
++    }
++
++    Collider_UpdateCylinder(actor, &this->collider);
++    if (this->collider.base.atFlags & (AT_HIT | AT_BOUNCED)) {
++        this->collider.base.atFlags &= ~(AT_HIT | AT_BOUNCED);
++        this->life = 0;
++    }
++
++    if (this->life <= 0) {
++        EoShot_Burst(play, this);
++        Actor_Kill(actor);
++        return;
++    }
++    this->life--;
++    CollisionCheck_SetAT(play, &play->colChkCtx, &this->collider.base);
++}
++
++static void EoShot_UpdateGroundWave(EnEoShot* this, PlayState* play) {
++    Actor* actor = &this->actor;
++    f32 prevFloor = actor->floorHeight;
++
++    actor->world.pos.x += actor->velocity.x;
++    actor->world.pos.z += actor->velocity.z;
++    actor->world.pos.y = prevFloor + 30.0f;
++    Actor_UpdateBgCheckInfo(play, actor, 20.0f, 20.0f, 40.0f, 5);
++    actor->world.pos.y = actor->floorHeight;
++
++    // A wall, a gap in the floor or a long drop puts it out
++    if ((actor->bgCheckFlags & 8) || (actor->floorHeight <= BGCHECK_Y_MIN + 1.0f) ||
++        (fabsf(actor->floorHeight - prevFloor) > 60.0f)) {
++        this->timer = 0;
++    }
++
++    if ((this->timer % 2) == 0) {
++        Vec3f puffPos = actor->world.pos;
++
++        puffPos.x += Rand_CenteredFloat(20.0f);
++        puffPos.z += Rand_CenteredFloat(20.0f);
++        EoShot_LookPuff(play, this->look, &puffPos, 1.0f);
++    }
++
++    if (this->look == EO_LOOK_FIRE) {
++        func_8002F974(actor, NA_SE_EV_BURN_OUT - SFX_FLAG);
++    }
++
++    Collider_UpdateCylinder(actor, &this->collider);
++    if (this->collider.base.atFlags & (AT_HIT | AT_BOUNCED)) {
++        this->collider.base.atFlags &= ~(AT_HIT | AT_BOUNCED);
++        this->timer = 0;
++    }
++
++    if (this->timer <= 0) {
++        EoShot_LookPuff(play, this->look, &actor->world.pos, 1.6f);
++        Actor_Kill(actor);
++        return;
++    }
++    this->timer--;
++    CollisionCheck_SetAT(play, &play->colChkCtx, &this->collider.base);
++}
++
++static void EoShot_UpdateRing(EnEoShot* this, PlayState* play) {
++    Actor* actor = &this->actor;
++    Player* player = GET_PLAYER(play);
++    f32 dist;
++
++    this->radius += this->radiusStep;
++    if (this->radius >= this->radiusMax) {
++        Actor_Kill(actor);
++        return;
++    }
++
++    if ((this->timer % 2) == 0) {
++        s32 count = CLAMP((s32)(this->radius / 45.0f), 8, 28);
++        s16 base = (s16)Rand_Next();
++        s32 i;
++
++        for (i = 0; i < count; i++) {
++            s16 angle = base + (s16)(i * (0x10000 / count));
++            Vec3f pos;
++
++            pos.x = actor->world.pos.x + (Math_SinS(angle) * this->radius);
++            pos.y = actor->floorHeight + 2.0f;
++            pos.z = actor->world.pos.z + (Math_CosS(angle) * this->radius);
++            EoShot_LookPuff(play, this->look, &pos, 0.8f);
++        }
++    }
++    this->timer++;
++
++    // One hit per ring, where the ring passes, and only while Link stands on the floor
++    if (this->damage != 0) {
++        dist = sqrtf(SQ(player->actor.world.pos.x - actor->world.pos.x) +
++                     SQ(player->actor.world.pos.z - actor->world.pos.z));
++
++        if ((fabsf(dist - this->radius) < (this->radiusStep + 30.0f)) &&
++            (fabsf(player->actor.world.pos.y - actor->floorHeight) < 45.0f) &&
++            Eo_HurtPlayer(play, (this->owner != NULL) ? this->owner : actor, this->damage,
++                          Math_Vec3f_Yaw(&actor->world.pos, &player->actor.world.pos), 8.0f, true, false)) {
++            this->damage = 0;
++        }
++    }
++}
++
++static void EoShot_UpdateBoomerang(EnEoShot* this, PlayState* play) {
++    Actor* actor = &this->actor;
++
++    this->timer++;
++    this->spin += this->spinStep;
++    func_8002F974(actor, NA_SE_IT_BOOMERANG_FLY - SFX_FLAG);
++
++    if ((this->timer < 34) && (this->owner != NULL)) {
++        // Out: slowing down, curving a little towards Link
++        Player* player = GET_PLAYER(play);
++
++        Math_ScaledStepToS(&actor->world.rot.y, Math_Vec3f_Yaw(&actor->world.pos, &player->actor.world.pos), 0x180);
++        this->speed *= 0.95f;
++        actor->velocity.x = Math_SinS(actor->world.rot.y) * this->speed;
++        actor->velocity.z = Math_CosS(actor->world.rot.y) * this->speed;
++        actor->velocity.y = 0.0f;
++    } else if (this->owner != NULL) {
++        // Back to its owner's hand
++        Vec3f home = this->owner->focus.pos;
++        f32 dist = Math_Vec3f_DistXYZ(&actor->world.pos, &home);
++
++        if ((dist < 60.0f) || (this->timer > 200)) {
++            Actor_Kill(actor);
++            return;
++        }
++        Math_StepToF(&this->speed, 22.0f, 1.2f);
++        EoShot_AimVelocity(&actor->world.pos, &home, this->speed, 0, &actor->velocity);
++    } else {
++        EoShot_Burst(play, this);
++        Actor_Kill(actor);
++        return;
++    }
++
++    actor->world.pos.x += actor->velocity.x;
++    actor->world.pos.y += actor->velocity.y;
++    actor->world.pos.z += actor->velocity.z;
++
++    if ((this->timer % 3) == 0) {
++        EoShot_Dust(play, &actor->world.pos, 50);
++    }
++
++    Collider_UpdateCylinder(actor, &this->collider);
++    if (this->collider.base.atFlags & (AT_HIT | AT_BOUNCED)) {
++        this->collider.base.atFlags &= ~(AT_HIT | AT_BOUNCED);
++        this->timer = MAX(this->timer, 34); // bounced off Link or his shield: it heads home
++        this->noHitTimer = 12;              // no second hit for a moment
++    }
++    if (this->noHitTimer > 0) {
++        this->noHitTimer--;
++    } else {
++        CollisionCheck_SetAT(play, &play->colChkCtx, &this->collider.base);
++    }
++}
++
++static void EoShot_UpdateFalling(EnEoShot* this, PlayState* play) {
++    Actor* actor = &this->actor;
++    Player* player = GET_PLAYER(play);
++
++    this->spin += this->spinStep;
++    actor->velocity.y -= 1.6f;
++    actor->world.pos.y += actor->velocity.y;
++
++    if ((this->dList == NULL) && ((this->timer % 2) == 0)) {
++        EoShot_Trail(play, this);
++    }
++
++    // The spot it will land on is marked all the way down
++    if ((this->timer % 5) == 0) {
++        Vec3f mark = this->target;
++
++        mark.x += Rand_CenteredFloat(30.0f);
++        mark.z += Rand_CenteredFloat(30.0f);
++        EoShot_Dust(play, &mark, 90);
++    }
++    this->timer++;
++
++    if (actor->world.pos.y <= this->target.y) {
++        f32 dist = sqrtf(SQ(player->actor.world.pos.x - this->target.x) +
++                         SQ(player->actor.world.pos.z - this->target.z));
++        s32 i;
++
++        actor->world.pos.y = this->target.y;
++        for (i = 0; i < 4; i++) {
++            Vec3f puffPos = this->target;
++
++            puffPos.x += Rand_CenteredFloat(60.0f);
++            puffPos.z += Rand_CenteredFloat(60.0f);
++            EoShot_Dust(play, &puffPos, 200);
++        }
++        if (this->dList == NULL) {
++            EoShot_Burst(play, this);
++        } else {
++            SoundSource_PlaySfxAtFixedWorldPos(play, &actor->world.pos, 20, NA_SE_EV_ROCK_BROKEN);
++        }
++
++        if ((dist < 70.0f) && (fabsf(player->actor.world.pos.y - this->target.y) < 80.0f)) {
++            Eo_HurtPlayer(play, (this->owner != NULL) ? this->owner : actor, this->damage,
++                          Math_Vec3f_Yaw(&this->target, &player->actor.world.pos), 6.0f, false, false);
++        }
++        Actor_Kill(actor);
++    }
++}
++
++void EnEoShot_Update(Actor* thisx, PlayState* play) {
++    EnEoShot* this = (EnEoShot*)thisx;
++
++    // Waves, rings, weapons and rocks vanish in cutscenes (a miniboss dying, a door opening...)
++    if (Play_InCsMode(play) && (this->mode != EO_SHOT_ORB)) {
++        Actor_Kill(thisx);
++        return;
++    }
++
++    switch (this->mode) {
++        case EO_SHOT_ORB:
++            this->timer++;
++            EoShot_UpdateOrb(this, play);
++            break;
++        case EO_SHOT_GROUND_WAVE:
++            EoShot_UpdateGroundWave(this, play);
++            break;
++        case EO_SHOT_RING:
++            EoShot_UpdateRing(this, play);
++            break;
++        case EO_SHOT_BOOMERANG:
++            EoShot_UpdateBoomerang(this, play);
++            break;
++        case EO_SHOT_FALLING:
++            EoShot_UpdateFalling(this, play);
++            break;
++        default:
++            Actor_Kill(thisx);
++            break;
++    }
++}
++
++/* ---------------------------------------------------------------------------------------------------------------
++ * Draw
++ * --------------------------------------------------------------------------------------------------------------- */
++
++// Two counter-rotating glows, like Navi's.
++static void EoShot_DrawOrb(EnEoShot* this, PlayState* play) {
++    EoKindInfo* info = &sEoKindInfo[this->kind];
++    f32 scale = this->drawScale;
++    s16 alpha = 255;
++
++    if (this->life < 8) {
++        alpha = CLAMP_MIN(this->life, 0) * 32;
++    }
++    if ((this->kind == EO_KIND_EMBER) && (this->maxLife > 0)) {
++        alpha = (alpha * CLAMP_MIN(this->life, 0)) / this->maxLife;
++    }
++
++    OPEN_DISPS(play->state.gfxCtx);
++
++    Gfx_SetupDL_25Xlu(play->state.gfxCtx);
++    gDPSetPrimColor(POLY_XLU_DISP++, 0, 0x80, info->prim.r, info->prim.g, info->prim.b, (u8)alpha);
++    gDPSetEnvColor(POLY_XLU_DISP++, info->env.r, info->env.g, info->env.b, 255);
++    Matrix_Translate(this->actor.world.pos.x, this->actor.world.pos.y, this->actor.world.pos.z, MTXMODE_NEW);
++    Matrix_Scale(scale, scale, scale, MTXMODE_APPLY);
++    Matrix_Mult(&play->billboardMtxF, MTXMODE_APPLY);
++    Matrix_Push();
++    Matrix_RotateZ(BINANG_TO_RAD(this->spin), MTXMODE_APPLY);
++    gSPMatrix(POLY_XLU_DISP++, MATRIX_NEWMTX(play->state.gfxCtx), G_MTX_NOPUSH | G_MTX_LOAD | G_MTX_MODELVIEW);
++    gSPDisplayList(POLY_XLU_DISP++, (Gfx*)gEffFlash1DL);
++    Matrix_Pop();
++    Matrix_RotateZ(BINANG_TO_RAD(-this->spin), MTXMODE_APPLY);
++    gSPMatrix(POLY_XLU_DISP++, MATRIX_NEWMTX(play->state.gfxCtx), G_MTX_NOPUSH | G_MTX_LOAD | G_MTX_MODELVIEW);
++    gSPDisplayList(POLY_XLU_DISP++, (Gfx*)gEffFlash1DL);
++
++    CLOSE_DISPS(play->state.gfxCtx);
++}
++
++void EnEoShot_Draw(Actor* thisx, PlayState* play) {
++    EnEoShot* this = (EnEoShot*)thisx;
++
++    if ((this->mode == EO_SHOT_ORB) || ((this->mode == EO_SHOT_FALLING) && (this->dList == NULL))) {
++        EoShot_DrawOrb(this, play);
++    } else if (((this->mode == EO_SHOT_BOOMERANG) || (this->mode == EO_SHOT_FALLING)) && (this->dList != NULL)) {
++        OPEN_DISPS(play->state.gfxCtx);
++
++        Gfx_SetupDL_25Opa(play->state.gfxCtx);
++        Matrix_Translate(thisx->world.pos.x, thisx->world.pos.y, thisx->world.pos.z, MTXMODE_NEW);
++        Matrix_RotateY(BINANG_TO_RAD(this->spin), MTXMODE_APPLY);
++        if (this->mode == EO_SHOT_BOOMERANG) {
++            Matrix_RotateZ(M_PI / 2, MTXMODE_APPLY);
++        } else {
++            Matrix_RotateX(BINANG_TO_RAD(this->spin), MTXMODE_APPLY);
++        }
++        Matrix_Scale(this->dListScale, this->dListScale, this->dListScale, MTXMODE_APPLY);
++        // Models borrowed from other actors may call the color display lists their owner sets up: point those
++        // segments somewhere harmless
++        gSPSegment(POLY_OPA_DISP++, 0x08, (uintptr_t)gEmptyDL);
++        gSPSegment(POLY_OPA_DISP++, 0x09, (uintptr_t)gEmptyDL);
++        gSPSegment(POLY_OPA_DISP++, 0x0A, (uintptr_t)gEmptyDL);
++        gSPSegment(POLY_OPA_DISP++, 0x0B, (uintptr_t)gEmptyDL);
++        gSPSegment(POLY_OPA_DISP++, 0x0C, (uintptr_t)gEmptyDL);
++        gSPSegment(POLY_OPA_DISP++, 0x0D, (uintptr_t)gEmptyDL);
++        gDPSetPrimColor(POLY_OPA_DISP++, 0, 0, 200, 200, 200, 255);
++        gDPSetEnvColor(POLY_OPA_DISP++, 40, 40, 40, 255);
++        gSPMatrix(POLY_OPA_DISP++, MATRIX_NEWMTX(play->state.gfxCtx), G_MTX_NOPUSH | G_MTX_LOAD | G_MTX_MODELVIEW);
++        gSPDisplayList(POLY_OPA_DISP++, this->dList);
++
++        CLOSE_DISPS(play->state.gfxCtx);
++    }
++}
+diff --git a/soh/src/overlays/actors/ovl_En_Eo_Shot/z_en_eo_shot.h b/soh/src/overlays/actors/ovl_En_Eo_Shot/z_en_eo_shot.h
+new file mode 100644
+index 0000000..145656e
+--- /dev/null
++++ b/soh/src/overlays/actors/ovl_En_Eo_Shot/z_en_eo_shot.h
+@@ -0,0 +1,51 @@
++#ifndef Z_EN_EO_SHOT_H
++#define Z_EN_EO_SHOT_H
++
++#include <libultraship/libultra.h>
++#include "global.h"
++#include "enemy_overhaul.h"
++
++/**
++ * Miniboss & Enemy Overhaul: a projectile, ground wave, shockwave ring, thrown weapon or falling rock. See
++ * enemy_overhaul.h for the functions that fire them. Registered in the ActorDB as a custom actor, like Ivan.
++ */
++
++typedef struct EnEoShot {
++    /* 0x000 */ Actor actor;
++    ColliderCylinder collider;
++    Actor* owner; // cleared when the owner is destroyed
++    u8 mode;      // EoShotMode
++    u8 kind;      // EoKind (orbs)
++    u8 look;      // EoLook (waves and rings)
++    u8 damage;    // ground wave / ring / falling damage (0x10 is one heart)
++    u8 gotHit;
++    s16 timer;
++    s16 life;
++    s16 maxLife;
++    s16 homing; // orbs: most it turns towards Link each frame, 0 for none
++    s16 spin;
++    s16 spinStep;
++    s16 noHitTimer;
++    f32 speed;
++    f32 gravity;
++    f32 drawScale;
++    f32 radius;
++    f32 radiusMax;
++    f32 radiusStep;
++    Vec3f target; // falling: landing spot
++    Gfx* dList;   // boomerang / falling model
++    f32 dListScale;
++} EnEoShot;
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++void EnEoShot_Init(Actor* thisx, PlayState* play);
++void EnEoShot_Destroy(Actor* thisx, PlayState* play);
++void EnEoShot_Update(Actor* thisx, PlayState* play);
++void EnEoShot_Draw(Actor* thisx, PlayState* play);
++#ifdef __cplusplus
++}
++#endif
++
++#endif
+diff --git a/soh/src/overlays/actors/ovl_En_Fd/z_en_fd.c b/soh/src/overlays/actors/ovl_En_Fd/z_en_fd.c
+index c20ef6e..007b88a 100644
+--- a/soh/src/overlays/actors/ovl_En_Fd/z_en_fd.c
++++ b/soh/src/overlays/actors/ovl_En_Fd/z_en_fd.c
+@@ -10,6 +10,7 @@
+ #include "soh/frame_interpolation.h"
+ #include "soh/Enhancements/game-interactor/GameInteractor_Hooks.h"
+ #include "soh/ResourceManagerHelpers.h"
++#include "enemy_overhaul.h"
+ 
+ #define FLAGS                                                                                 \
+     (ACTOR_FLAG_ATTENTION_ENABLED | ACTOR_FLAG_HOSTILE | ACTOR_FLAG_UPDATE_CULLING_DISABLED | \
+@@ -227,7 +228,8 @@ s32 EnFd_SpawnCore(EnFd* this, PlayState* play) {
+     this->actor.child->colChkInfo.health = this->actor.colChkInfo.health % 8;
+ 
+     if (this->actor.child->colChkInfo.health == 0) {
+-        this->actor.child->colChkInfo.health = 8;
++        // Miniboss & Enemy Overhaul: the exposed core takes twice the hits (the number of rounds stays the same)
++        this->actor.child->colChkInfo.health = EO_HP2(8);
+     }
+ 
+     if (CHECK_FLAG_ALL(this->actor.flags, ACTOR_FLAG_HOOKSHOT_ATTACHED)) {
+@@ -509,6 +511,10 @@ void EnFd_SpinAndGrow(EnFd* this, PlayState* play) {
+ 
+ void EnFd_JumpToGround(EnFd* this, PlayState* play) {
+     if ((this->actor.bgCheckFlags & 1) && !(this->actor.velocity.y > 0.0f)) {
++        // Miniboss & Enemy Overhaul: every landing throws off a ring of fire (jump it)
++        if (EO_MB_ATTACKS_ON() && Eo_CanAttack(play) && (this->invincibilityTimer == 0)) {
++            EoShot_Ring(play, &this->actor, EO_LOOK_FIRE, &this->actor.world.pos, 260.0f, 10.0f, 0x10);
++        }
+         this->actor.velocity.y = 0.0f;
+         this->actor.speedXZ = 0.0f;
+         this->actor.world.rot.y = this->actor.shape.rot.y;
+@@ -633,6 +639,30 @@ void EnFd_Run(EnFd* this, PlayState* play) {
+         Audio_PlayActorSound2(&this->actor, NA_SE_EN_FLAME_KICK);
+     }
+     Math_SmoothStepToF(&this->actor.speedXZ, 8.0f, 0.1f, 1.0f, 0.0f);
++
++    // Miniboss & Enemy Overhaul: it throws fireballs as it dances around Link, and its steps leave burning
++    // footprints behind for a moment
++    if (EO_MB_ATTACKS_ON() && Eo_CanAttack(play) && (this->invincibilityTimer == 0)) {
++        if (this->eoOrbTimer > 0) {
++            this->eoOrbTimer--;
++        } else if (this->actor.xzDistToPlayer > 150.0f) {
++            Vec3f pos = this->actor.world.pos;
++
++            pos.y += 40.0f;
++            EoShot_OrbFan(play, &this->actor, EO_KIND_FIRE, &pos, 11.0f, 3, 0x1400);
++            Audio_PlayActorSound2(&this->actor, NA_SE_EN_FLAME_LAUGH);
++            this->eoOrbTimer = 90 + (s16)Rand_ZeroFloat(40.0f);
++        }
++
++        if (++this->eoTrailTimer >= 6) {
++            Vec3f pos = this->actor.world.pos;
++            Vec3f vel = { 0.0f, 0.0f, 0.0f };
++
++            this->eoTrailTimer = 0;
++            pos.y = this->actor.floorHeight + 12.0f;
++            EoShot_Orb(play, &this->actor, EO_KIND_EMBER, &pos, &vel);
++        }
++    }
+ }
+ 
+ /**
+diff --git a/soh/src/overlays/actors/ovl_En_Fd/z_en_fd.h b/soh/src/overlays/actors/ovl_En_Fd/z_en_fd.h
+index 28904d0..48ff495 100644
+--- a/soh/src/overlays/actors/ovl_En_Fd/z_en_fd.h
++++ b/soh/src/overlays/actors/ovl_En_Fd/z_en_fd.h
+@@ -49,6 +49,9 @@ typedef struct EnFd {
+     /* 0x04DC */ Vec3s jointTable[27];
+     /* 0x057E */ Vec3s morphTable[27];
+     /* 0x0620 */ EnFdEffect effects[200];
+-} EnFd; // size = 0x31E0
++    // Miniboss & Enemy Overhaul
++    s16 eoOrbTimer;
++    s16 eoTrailTimer;
++} EnFd;
+ 
+ #endif
+diff --git a/soh/src/overlays/actors/ovl_En_Fw/z_en_fw.c b/soh/src/overlays/actors/ovl_En_Fw/z_en_fw.c
+index 6a293a6..5facfc8 100644
+--- a/soh/src/overlays/actors/ovl_En_Fw/z_en_fw.c
++++ b/soh/src/overlays/actors/ovl_En_Fw/z_en_fw.c
+@@ -10,6 +10,7 @@
+ #include "objects/gameplay_keep/gameplay_keep.h"
+ #include "soh/frame_interpolation.h"
+ #include "soh/ResourceManagerHelpers.h"
++#include "enemy_overhaul.h"
+ 
+ #define FLAGS                                                                                 \
+     (ACTOR_FLAG_ATTENTION_ENABLED | ACTOR_FLAG_HOSTILE | ACTOR_FLAG_UPDATE_CULLING_DISABLED | \
+@@ -371,6 +372,19 @@ void EnFw_Update(Actor* thisx, PlayState* play) {
+         Actor_MoveXZGravity(&this->actor);
+         Actor_UpdateBgCheckInfo(play, &this->actor, 10.0f, 20.0f, 0.0f, 5);
+         this->actionFunc(this, play);
++        // Miniboss & Enemy Overhaul: the exposed core spits fireballs while it runs
++        if (EO_MB_ATTACKS_ON() && (this->actionFunc == EnFw_Run) && (this->damageTimer == 0) &&
++            (this->explosionTimer == 0) && Eo_CanAttack(play)) {
++            if (this->eoOrbTimer == 0) {
++                this->eoOrbTimer = 50;
++            } else if ((--this->eoOrbTimer == 0) && (this->actor.xzDistToPlayer > 120.0f)) {
++                Vec3f pos = this->actor.world.pos;
++
++                pos.y += 30.0f;
++                EoShot_OrbAimed(play, &this->actor, EO_KIND_FIRE, &pos, 9.0f, 0);
++                this->eoOrbTimer = 60 + (s16)Rand_ZeroFloat(30.0f);
++            }
++        }
+         if (this->damageTimer == 0 && this->explosionTimer == 0 && this->actionFunc == EnFw_Run) {
+             CollisionCheck_SetAC(play, &play->colChkCtx, &this->collider.base);
+         }
+diff --git a/soh/src/overlays/actors/ovl_En_Fw/z_en_fw.h b/soh/src/overlays/actors/ovl_En_Fw/z_en_fw.h
+index bea5e87..c5ad2fd 100644
+--- a/soh/src/overlays/actors/ovl_En_Fw/z_en_fw.h
++++ b/soh/src/overlays/actors/ovl_En_Fw/z_en_fw.h
+@@ -44,6 +44,8 @@ typedef struct EnFw {
+     /* 0x021C */ Vec3s jointTable[11];
+     /* 0x025E */ Vec3s morphTable[11];
+     /* 0x02A0 */ EnFwEffect effects[20];
+-} EnFw; // size = 0x0700
++    // Miniboss & Enemy Overhaul
++    s16 eoOrbTimer;
++} EnFw;
+ 
+ #endif
+diff --git a/soh/src/overlays/actors/ovl_En_Fz/z_en_fz.c b/soh/src/overlays/actors/ovl_En_Fz/z_en_fz.c
+index fbfbf92..cafd838 100644
+--- a/soh/src/overlays/actors/ovl_En_Fz/z_en_fz.c
++++ b/soh/src/overlays/actors/ovl_En_Fz/z_en_fz.c
+@@ -2,6 +2,7 @@
+ #include "objects/object_fz/object_fz.h"
+ #include "soh/frame_interpolation.h"
+ #include "soh/Enhancements/game-interactor/GameInteractor_Hooks.h"
++#include "enemy_overhaul.h"
+ 
+ #define FLAGS                                                                                 \
+     (ACTOR_FLAG_ATTENTION_ENABLED | ACTOR_FLAG_HOSTILE | ACTOR_FLAG_UPDATE_CULLING_DISABLED | \
+@@ -543,6 +544,14 @@ void EnFz_BlowSmoke(EnFz* this, PlayState* play) {
+         pos.z += (velocity.z * 0.5f);
+ 
+         EnFz_SpawnIceSmokeFreeze(this, &pos, &velocity, &accel, 2.0f, 25.0f, primAlpha, false);
++
++        // Miniboss & Enemy Overhaul: the breath ends with a spit of three ice shards
++        if (EO_ENEMIES_ON() && (this->timer == 11) && Eo_CanAttack(play)) {
++            pos.x = this->actor.world.pos.x + (Math_SinS(this->actor.shape.rot.y) * 30.0f);
++            pos.y = this->actor.world.pos.y + 25.0f;
++            pos.z = this->actor.world.pos.z + (Math_CosS(this->actor.shape.rot.y) * 30.0f);
++            EoShot_OrbFan(play, &this->actor, EO_KIND_ICE, &pos, 8.0f, 3, 0x1200);
++        }
+     }
+ }
+ 
+diff --git a/soh/src/overlays/actors/ovl_En_GeldB/z_en_geldb.c b/soh/src/overlays/actors/ovl_En_GeldB/z_en_geldb.c
+index f1b6852..070a0ae 100644
+--- a/soh/src/overlays/actors/ovl_En_GeldB/z_en_geldb.c
++++ b/soh/src/overlays/actors/ovl_En_GeldB/z_en_geldb.c
+@@ -9,6 +9,7 @@
+ #include "soh/Enhancements/randomizer/randomizer_entrance.h"
+ #include "soh/Enhancements/game-interactor/GameInteractor_Hooks.h"
+ #include "soh/ResourceManagerHelpers.h"
++#include "enemy_overhaul.h"
+ 
+ #define FLAGS (ACTOR_FLAG_ATTENTION_ENABLED | ACTOR_FLAG_HOSTILE | ACTOR_FLAG_UPDATE_CULLING_DISABLED)
+ 
+@@ -228,7 +229,7 @@ void EnGeldB_Init(Actor* thisx, PlayState* play) {
+     thisx->colChkInfo.damageTable = &sDamageTable;
+     ActorShape_Init(&thisx->shape, 0.0f, ActorShadow_DrawFeet, 0.0f);
+     this->actor.colChkInfo.mass = MASS_HEAVY;
+-    thisx->colChkInfo.health = 20;
++    thisx->colChkInfo.health = EO_HP2(20);
+     thisx->colChkInfo.cylRadius = 50;
+     thisx->colChkInfo.cylHeight = 100;
+     thisx->naviEnemyId = 0x54;
+@@ -942,6 +943,11 @@ void EnGeldB_SpinAttack(EnGeldB* this, PlayState* play) {
+         Audio_PlayActorSound2(&this->actor, NA_SE_EN_GERUDOFT_ATTACK);
+     } else if ((s32)this->skelAnime.curFrame == 21) {
+         this->actor.speedXZ = 0.0f;
++        // Miniboss & Enemy Overhaul: the spin ends in a sweep of dust along the floor (jump it)
++        if (EO_MB_ATTACKS_ON() && (this->spinAttackState < 2) && Eo_CanAttack(play) &&
++            (this->skelAnime.curFrame - this->skelAnime.playSpeed < 21.0f)) {
++            EoShot_Ring(play, &this->actor, EO_LOOK_DUST, &this->actor.world.pos, 190.0f, 10.0f, 0x08);
++        }
+     } else if ((s32)this->skelAnime.curFrame == 24) {
+         this->meleeWeaponState = -1;
+     }
+@@ -1055,6 +1061,31 @@ void EnGeldB_SetupDamaged(EnGeldB* this) {
+     EnGeldB_SetupAction(this, EnGeldB_Damaged);
+ }
+ 
++/**
++ * Miniboss & Enemy Overhaul: once badly hurt, a Gerudo sometimes answers a hit by vanishing in a puff of smoke and
++ * striking from behind Link.
++ */
++s32 EnGeldB_EoFlashStep(EnGeldB* this, PlayState* play) {
++    Player* player = GET_PLAYER(play);
++    Vec3f pos;
++
++    if (!EO_MB_ATTACKS_ON() || (this->eoFlashCooldown > 0) || !Eo_CanAttack(play) ||
++        !EO_AT_OR_BELOW(this->actor.colChkInfo.health, EO_HP2(20), 1, 2) || (Rand_ZeroOne() >= 0.5f) ||
++        !Eo_PosBehindPlayer(play, 70.0f, &pos)) {
++        return false;
++    }
++
++    Eo_Puff(play, &this->actor.world.pos, 1.5f);
++    this->actor.world.pos = pos;
++    this->actor.prevPos = pos;
++    this->actor.speedXZ = 0.0f;
++    this->actor.world.rot.y = this->actor.shape.rot.y = Math_Vec3f_Yaw(&pos, &player->actor.world.pos);
++    Eo_Puff(play, &pos, 1.5f);
++    this->eoFlashCooldown = 120;
++    EnGeldB_SetupSlash(this);
++    return true;
++}
++
+ void EnGeldB_Damaged(EnGeldB* this, PlayState* play) {
+     s16 angleToWall;
+ 
+@@ -1070,6 +1101,9 @@ void EnGeldB_Damaged(EnGeldB* this, PlayState* play) {
+     Math_SmoothStepToS(&this->actor.shape.rot.y, this->actor.yawTowardsPlayer, 1, 0x1194, 0);
+     if (!EnGeldB_DodgeRanged(play, this) && !EnGeldB_ReactToPlayer(play, this, 0) &&
+         SkelAnime_Update(&this->skelAnime) && (this->actor.bgCheckFlags & 1)) {
++        if (EnGeldB_EoFlashStep(this, play)) {
++            return;
++        }
+         angleToWall = this->actor.wallYaw - this->actor.shape.rot.y;
+         if ((this->actor.bgCheckFlags & 8) && (ABS(angleToWall) < 0x2EE0) && (this->actor.xzDistToPlayer < 90.0f)) {
+             EnGeldB_SetupJump(this);
+@@ -1110,6 +1144,10 @@ void EnGeldB_Jump(EnGeldB* this, PlayState* play) {
+         this->actor.speedXZ = 0.0f;
+         this->actor.velocity.y = 0.0f;
+         this->actor.world.pos.y = this->actor.floorHeight;
++        // Miniboss & Enemy Overhaul: she lands with a shockwave (jump it)
++        if (EO_MB_ATTACKS_ON() && Eo_CanAttack(play)) {
++            EoShot_Ring(play, &this->actor, EO_LOOK_DUST, &this->actor.world.pos, 200.0f, 10.0f, 0x08);
++        }
+         if (!Actor_OtherIsTargeted(play, &this->actor)) {
+             EnGeldB_SetupSlash(this);
+         } else {
+@@ -1407,6 +1445,9 @@ void EnGeldB_Update(Actor* thisx, PlayState* play) {
+     s32 pad;
+     EnGeldB* this = (EnGeldB*)thisx;
+ 
++    if (this->eoFlashCooldown > 0) {
++        this->eoFlashCooldown--;
++    }
+     EnGeldB_CollisionCheck(this, play);
+     if (this->actor.colChkInfo.damageEffect != GELDB_DMG_UNK_6) {
+         Actor_MoveXZGravity(&this->actor);
+diff --git a/soh/src/overlays/actors/ovl_En_GeldB/z_en_geldb.h b/soh/src/overlays/actors/ovl_En_GeldB/z_en_geldb.h
+index dc06d29..54d0b53 100644
+--- a/soh/src/overlays/actors/ovl_En_GeldB/z_en_geldb.h
++++ b/soh/src/overlays/actors/ovl_En_GeldB/z_en_geldb.h
+@@ -67,6 +67,8 @@ typedef struct EnGeldB {
+     /* 0x04C4 */ Vec3f rightFootPos;
+     /* 0x04D0 */ Vec3f leftFootPos;
+     /* 0x04DC */ Vec3s headRot;
+-} EnGeldB; // size = 0x04E4
++    // Miniboss & Enemy Overhaul
++    s16 eoFlashCooldown;
++} EnGeldB;
+ 
+ #endif
+diff --git a/soh/src/overlays/actors/ovl_En_Ik/z_en_ik.c b/soh/src/overlays/actors/ovl_En_Ik/z_en_ik.c
+index c4dbe3f..c16fcc7 100644
+--- a/soh/src/overlays/actors/ovl_En_Ik/z_en_ik.c
++++ b/soh/src/overlays/actors/ovl_En_Ik/z_en_ik.c
+@@ -10,6 +10,7 @@
+ #include "vt.h"
+ #include "soh/Enhancements/game-interactor/GameInteractor_Hooks.h"
+ #include "soh/ResourceManagerHelpers.h"
++#include "enemy_overhaul.h"
+ 
+ #define FLAGS ACTOR_FLAG_UPDATE_CULLING_DISABLED
+ 
+@@ -53,6 +54,7 @@ void func_80A77ED0(EnIk* this, PlayState* play);
+ void func_80A77EDC(EnIk* this, PlayState* play);
+ void func_80A78160(EnIk* this, PlayState* play);
+ void func_80A781CC(Actor* thisx, PlayState* play);
++void EnIk_EoThrowAxe(EnIk* this, PlayState* play);
+ 
+ static ColliderCylinderInit sCylinderInit = {
+     {
+@@ -204,13 +206,15 @@ void func_80A74398(Actor* thisx, PlayState* play) {
+     thisx->colChkInfo.damageTable = &sDamageTable;
+     thisx->colChkInfo.mass = MASS_HEAVY;
+     this->unk_2FC = 0;
+-    thisx->colChkInfo.health = 30;
++    thisx->colChkInfo.health = EO_HP2(30);
+     thisx->gravity = -1.0f;
+     this->switchFlags = (thisx->params >> 8) & 0xFF;
+     thisx->params &= 0xFF;
++    this->eoAxeCooldown = 150;
+ 
+     if (thisx->params == 0) {
+-        thisx->colChkInfo.health += 20;
++        // Nabooru is beaten once she is down to 10: double the 40 above that
++        thisx->colChkInfo.health = EO_HP2(40) + 10;
+         thisx->naviEnemyId = 0x34;
+     } else {
+         Actor_SetScale(thisx, 0.012f);
+@@ -233,6 +237,7 @@ void func_80A74398(Actor* thisx, PlayState* play) {
+ 
+     Effect_Add(play, &this->blureIdx, EFFECT_BLURE1, 0, 0, &blureInit);
+     func_80A74714(this);
++    this->eoMaxHealth = thisx->colChkInfo.health;
+ 
+     uint8_t enemyRandoCCActive = CVarGetInteger(CVAR_ENHANCEMENT("RandomizedEnemies"), 0) ||
+                                  (CVarGetInteger(CVAR_REMOTE_CROWD_CONTROL("Enabled"), 0));
+@@ -252,7 +257,7 @@ void func_80A74398(Actor* thisx, PlayState* play) {
+ }
+ 
+ s32 func_80A745E4(EnIk* this, PlayState* play) {
+-    if (((this->unk_2FB != 0) || (this->actor.params == 0)) &&
++    if ((this->eoAxeThrown == 0) && ((this->unk_2FB != 0) || (this->actor.params == 0)) &&
+         (func_800354B4(play, &this->actor, 100.0f, 0x2710, 0x4000, this->actor.shape.rot.y) != 0) &&
+         (play->gameplayFrames & 1)) {
+         func_80A755F0(this);
+@@ -333,6 +338,18 @@ void func_80A7492C(EnIk* this, PlayState* play) {
+     s32 phi_a0 = (this->unk_2FB == 0) ? 0xAAA : 0x3FFC;
+     s16 yawDiff = this->actor.yawTowardsPlayer - this->actor.shape.rot.y;
+ 
++    // Miniboss & Enemy Overhaul: empty-handed, he waits for his axe to come back
++    if (this->eoAxeThrown) {
++        if ((EoShot_CountOwned(&this->actor, EO_SHOT_BOOMERANG) == 0) || (--this->eoAxeWait <= 0)) {
++            this->eoAxeThrown = 0;
++        } else {
++            Math_SmoothStepToS(&this->actor.world.rot.y, this->actor.yawTowardsPlayer, 1, 0x3E8, 0);
++            this->actor.shape.rot.y = this->actor.world.rot.y;
++            SkelAnime_Update(&this->skelAnime);
++            return;
++        }
++    }
++
+     if ((ABS(yawDiff) <= phi_a0) && (this->actor.xzDistToPlayer < 100.0f) &&
+         (ABS(this->actor.yDistToPlayer) < 150.0f)) {
+         if ((play->gameplayFrames & 1)) {
+@@ -393,6 +410,24 @@ void func_80A74BA4(EnIk* this, PlayState* play) {
+     }
+     this->actor.shape.rot.y = this->actor.world.rot.y;
+     yawDiff = this->actor.yawTowardsPlayer - this->actor.shape.rot.y;
++
++    // Miniboss & Enemy Overhaul: from a distance he hurls his axe, which comes back to him like a boomerang
++    if (EO_MB_ATTACKS_ON() && (this->eoAxeCooldown == 0) && (this->actor.xzDistToPlayer > 200.0f) &&
++        (this->actor.xzDistToPlayer < 420.0f) && (ABS(yawDiff) < 0x1000) && (ABS(this->actor.yDistToPlayer) < 60.0f) &&
++        Eo_CanAttack(play)) {
++        f32 frames = Animation_GetLastFrame(&gIronKnuckleHorizontalAttackAnim);
++
++        this->unk_2F8 = 6;
++        this->unk_2FE = 0;
++        this->unk_2FF = 0;
++        this->actor.speedXZ = 0.0f;
++        Animation_Change(&this->skelAnime, &gIronKnuckleHorizontalAttackAnim, 1.0f, 0.0f, frames,
++                         ANIMMODE_ONCE_INTERP, -6.0f);
++        Audio_PlayActorSound2(&this->actor, NA_SE_EN_IRONNACK_DASH);
++        EnIk_SetupAction(this, EnIk_EoThrowAxe);
++        return;
++    }
++
+     if ((ABS(yawDiff) <= temp_t0) && (this->actor.xzDistToPlayer < 100.0f)) {
+         if (ABS(this->actor.yDistToPlayer) < 150.0f) {
+             if ((play->gameplayFrames & 1)) {
+@@ -446,6 +481,11 @@ void func_80A74EBC(EnIk* this, PlayState* play) {
+         Camera_AddQuake(&play->mainCamera, 2, 0x19, 5);
+         func_800AA000(this->actor.xzDistToPlayer, 0xFF, 0x14, 0x96);
+         CollisionCheck_SpawnShieldParticles(play, &sp2C);
++        // Miniboss & Enemy Overhaul: the smash splits the floor towards Link (three ways once his armor is off)
++        if (EO_MB_ATTACKS_ON() && Eo_CanAttack(play)) {
++            EoShot_GroundWaveFan(play, &this->actor, EO_LOOK_DUST, &sp2C, (this->unk_2FB != 0) ? 3 : 1, 0x1400, 11.0f,
++                                 45, 0x10);
++        }
+     }
+ 
+     if ((this->skelAnime.curFrame > 17.0f) && (this->skelAnime.curFrame < 23.0f)) {
+@@ -490,6 +530,37 @@ void func_80A7510C(EnIk* this, PlayState* play) {
+     }
+ }
+ 
++/**
++ * Miniboss & Enemy Overhaul: the axe throw. He swings as for his sideways slash and lets go at the end of it; then he
++ * stands empty-handed (and open to attack) until the axe comes back.
++ */
++void EnIk_EoThrowAxe(EnIk* this, PlayState* play) {
++    Math_SmoothStepToS(&this->actor.world.rot.y, this->actor.yawTowardsPlayer, 1, 0x3E8, 0);
++    this->actor.shape.rot.y = this->actor.world.rot.y;
++
++    if (!this->eoAxeThrown && (this->skelAnime.curFrame >= 11.0f)) {
++        Vec3f pos = this->actor.world.pos;
++
++        pos.y += 70.0f;
++        pos.x += Math_SinS(this->actor.shape.rot.y) * 40.0f;
++        pos.z += Math_CosS(this->actor.shape.rot.y) * 40.0f;
++        if (EoShot_Boomerang(play, &this->actor, (Gfx*)gIronKnuckleAxeDL, this->actor.scale.x, &pos,
++                             this->actor.yawTowardsPlayer, 19.0f, 0x10) != NULL) {
++            this->eoAxeThrown = 1;
++            this->eoAxeWait = 150;
++            Audio_PlayActorSound2(&this->actor, NA_SE_EN_IRONNACK_SWING_AXE);
++        }
++        this->eoAxeCooldown = 240 + (s16)Rand_ZeroFloat(120.0f);
++    }
++
++    if (SkelAnime_Update(&this->skelAnime)) {
++        if (!this->eoAxeThrown) {
++            this->eoAxeCooldown = 120;
++        }
++        func_80A7489C(this);
++    }
++}
++
+ void func_80A751C8(EnIk* this) {
+     f32 frames = Animation_GetLastFrame(&gIronKnuckleHorizontalAttackAnim);
+ 
+@@ -722,9 +793,13 @@ void func_80A75C38(EnIk* this, PlayState* play) {
+     prevHealth = this->actor.colChkInfo.health;
+     Actor_ApplyDamage(&this->actor);
+     if (this->actor.params != 0) {
+-        if ((prevHealth > 10) && (this->actor.colChkInfo.health <= 10)) {
++        if ((prevHealth > EO_HP2(10)) && (this->actor.colChkInfo.health <= EO_HP2(10))) {
+             this->unk_2FB = 1;
+             BodyBreak_Alloc(&this->bodyBreak, 3, play);
++            // Miniboss & Enemy Overhaul: the armor bursts off with a shockwave
++            if (EO_MB_ATTACKS_ON() && Eo_CanAttack(play)) {
++                EoShot_Ring(play, &this->actor, EO_LOOK_DUST, &this->actor.world.pos, 260.0f, 10.0f, 0x08);
++            }
+         }
+     } else if (this->actor.colChkInfo.health <= 10) {
+         Actor_ChangeCategory(play, &play->actorCtx, &this->actor, ACTORCAT_BOSS);
+@@ -733,7 +808,7 @@ void func_80A75C38(EnIk* this, PlayState* play) {
+             Flags_SetSwitch(play, this->switchFlags);
+         }
+         return;
+-    } else if (prevHealth == 50) {
++    } else if (prevHealth == this->eoMaxHealth) {
+         Actor_ChangeCategory(play, &play->actorCtx, &this->actor, ACTORCAT_ENEMY);
+     }
+ 
+@@ -749,7 +824,7 @@ void func_80A75C38(EnIk* this, PlayState* play) {
+         }
+     }
+     if ((this->actor.params != 0) && (this->unk_2FB != 0)) {
+-        if ((prevHealth > 10) && (this->actor.colChkInfo.health <= 10)) {
++        if ((prevHealth > EO_HP2(10)) && (this->actor.colChkInfo.health <= EO_HP2(10))) {
+             Audio_PlayActorSound2(&this->actor, NA_SE_EN_IRONNACK_ARMOR_OFF_DEMO);
+         } else {
+             Audio_PlayActorSound2(&this->actor, NA_SE_EN_IRONNACK_DAMAGE);
+@@ -770,6 +845,9 @@ void func_80A75FA0(Actor* thisx, PlayState* play) {
+     u8 prevInvincibilityTimer;
+ 
+     this->unk_2FA = this->unk_2FB;
++    if (this->eoAxeCooldown > 0) {
++        this->eoAxeCooldown--;
++    }
+     func_80A75C38(this, play);
+     if ((this->actor.params == 0) && (this->actor.colChkInfo.health <= 10)) {
+         func_80A781CC(&this->actor, play);
+@@ -841,6 +919,11 @@ s32 EnIk_OverrideLimbDraw3(PlayState* play, s32 limbIndex, Gfx** dList, Vec3f* p
+         if (this->actor.params != 0) {
+             *dList = gIronKnuckleGerudoHeadDL;
+         }
++    } else if (limbIndex == 17) {
++        // Miniboss & Enemy Overhaul: the axe is in the air
++        if (this->eoAxeThrown) {
++            *dList = NULL;
++        }
+     } else if ((limbIndex == 26) || (limbIndex == 27)) {
+         if ((this->unk_2FA & 1)) {
+             *dList = NULL;
+diff --git a/soh/src/overlays/actors/ovl_En_Ik/z_en_ik.h b/soh/src/overlays/actors/ovl_En_Ik/z_en_ik.h
+index a77db20..3b26e34 100644
+--- a/soh/src/overlays/actors/ovl_En_Ik/z_en_ik.h
++++ b/soh/src/overlays/actors/ovl_En_Ik/z_en_ik.h
+@@ -35,6 +35,11 @@ typedef struct EnIk {
+     /* 0x04D0 */ u32 npcAction;
+     /* 0x04D4 */ s32 unk_4D4;
+     /* 0x04D8 */ char unk_4D8[0x04];
+-} EnIk; // size = 0x04DC
++    // Miniboss & Enemy Overhaul
++    s16 eoMaxHealth;
++    s16 eoAxeCooldown;
++    s16 eoAxeWait;
++    u8 eoAxeThrown;
++} EnIk;
+ 
+ #endif
+diff --git a/soh/src/overlays/actors/ovl_En_Okuta/z_en_okuta.c b/soh/src/overlays/actors/ovl_En_Okuta/z_en_okuta.c
+index 8f0c730..f56205e 100644
+--- a/soh/src/overlays/actors/ovl_En_Okuta/z_en_okuta.c
++++ b/soh/src/overlays/actors/ovl_En_Okuta/z_en_okuta.c
+@@ -1,5 +1,6 @@
+ #include "z_en_okuta.h"
+ #include "objects/object_okuta/object_okuta.h"
++#include "enemy_overhaul.h"
+ #include "objects/gameplay_field_keep/gameplay_field_keep.h"
+ #include "soh/Enhancements/game-interactor/GameInteractor_Hooks.h"
+ #include "soh/ResourceManagerHelpers.h"
+@@ -279,6 +280,17 @@ void EnOkuta_SpawnProjectile(EnOkuta* this, PlayState* play) {
+     pos.z = this->actor.world.pos.z + (25.0f * cos);
+     if (Actor_Spawn(&play->actorCtx, play, ACTOR_EN_OKUTA, pos.x, pos.y, pos.z, this->actor.shape.rot.x,
+                     this->actor.shape.rot.y, this->actor.shape.rot.z, 0x10) != NULL) {
++        // Miniboss & Enemy Overhaul: every third shot is a spread of three rocks
++        if (EO_ENEMIES_ON() && ((++this->eoShotCount % 3) == 0)) {
++            s32 i;
++
++            // set apart sideways so the rocks don't knock into each other
++            for (i = -1; i <= 1; i += 2) {
++                Actor_Spawn(&play->actorCtx, play, ACTOR_EN_OKUTA, pos.x + (i * 30.0f * cos), pos.y,
++                            pos.z - (i * 30.0f * sin), this->actor.shape.rot.x,
++                            this->actor.shape.rot.y + (i * 0x1400), this->actor.shape.rot.z, 0x10);
++            }
++        }
+         pos.x = this->actor.world.pos.x + (40.0f * sin);
+         pos.z = this->actor.world.pos.z + (40.0f * cos);
+         pos.y = this->actor.world.pos.y;
+diff --git a/soh/src/overlays/actors/ovl_En_Okuta/z_en_okuta.h b/soh/src/overlays/actors/ovl_En_Okuta/z_en_okuta.h
+index 7bc257b..8e59808 100644
+--- a/soh/src/overlays/actors/ovl_En_Okuta/z_en_okuta.h
++++ b/soh/src/overlays/actors/ovl_En_Okuta/z_en_okuta.h
+@@ -19,6 +19,8 @@ typedef struct EnOkuta {
+     /* 0x0360 */ f32 jumpHeight;
+     /* 0x0364 */ Vec3f headScale;
+     /* 0x0370 */ ColliderCylinder collider;
+-} EnOkuta; // size = 0x03BC
++    // Miniboss & Enemy Overhaul
++    u8 eoShotCount;
++} EnOkuta;
+ 
+ #endif
+diff --git a/soh/src/overlays/actors/ovl_En_Po_Sisters/z_en_po_sisters.c b/soh/src/overlays/actors/ovl_En_Po_Sisters/z_en_po_sisters.c
+index a58041e..f16d086 100644
+--- a/soh/src/overlays/actors/ovl_En_Po_Sisters/z_en_po_sisters.c
++++ b/soh/src/overlays/actors/ovl_En_Po_Sisters/z_en_po_sisters.c
+@@ -10,6 +10,7 @@
+ #include "soh/frame_interpolation.h"
+ #include "soh/Enhancements/game-interactor/GameInteractor_Hooks.h"
+ #include "soh/ResourceManagerHelpers.h"
++#include "enemy_overhaul.h"
+ 
+ #define FLAGS                                                                                 \
+     (ACTOR_FLAG_ATTENTION_ENABLED | ACTOR_FLAG_HOSTILE | ACTOR_FLAG_UPDATE_CULLING_DISABLED | \
+@@ -200,6 +201,8 @@ void EnPoSisters_Init(Actor* thisx, PlayState* play) {
+     Collider_InitCylinder(play, &this->collider);
+     Collider_SetCylinder(play, &this->collider, &this->actor, &sCylinderInit);
+     CollisionCheck_SetInfo(&this->actor.colChkInfo, &sDamageTable, &sColChkInfoInit);
++    this->actor.colChkInfo.health = EO_HP2(this->actor.colChkInfo.health);
++    this->eoShotTimer = 90;
+     this->unk_194 = (thisx->params >> 8) & 3;
+     this->actor.naviEnemyId = this->unk_194 + 0x50;
+     this->unk_195 = (thisx->params >> 0xA) & 3;
+@@ -1181,6 +1184,42 @@ void func_80ADC10C(EnPoSisters* this, PlayState* play) {
+     }
+ }
+ 
++/**
++ * Miniboss & Enemy Overhaul: while a sister closes in, she throws a ball of her own color at Link: Meg darkness,
++ * Joelle fire, Beth ice and Amy lightning. Joelle's spin also scatters embers. Meg's copies never shoot.
++ */
++void EnPoSisters_EoExtras(EnPoSisters* this, PlayState* play) {
++    static s32 sKinds[4] = { EO_KIND_DARK, EO_KIND_FIRE, EO_KIND_ICE, EO_KIND_SHOCK };
++    Vec3f pos;
++
++    if (!EO_MB_ATTACKS_ON() || (this->unk_195 != 0) || (this->unk_22E.a != 255) ||
++        (this->actor.colChkInfo.health == 0) || !Eo_CanAttack(play)) {
++        return;
++    }
++
++    pos = this->actor.world.pos;
++    pos.y += 45.0f;
++
++    if ((this->actionFunc == func_80ADA8C0) && (this->unk_194 == 1) && ((play->gameplayFrames % 5) == 0)) {
++        Vec3f vel = { 0.0f, 0.0f, 0.0f };
++
++        vel.x = Rand_CenteredFloat(4.0f);
++        vel.z = Rand_CenteredFloat(4.0f);
++        EoShot_Orb(play, &this->actor, EO_KIND_EMBER, &pos, &vel);
++    }
++
++    if ((this->actionFunc != func_80ADA6A0) && (this->actionFunc != func_80ADA530)) {
++        return;
++    }
++    if (this->eoShotTimer > 0) {
++        this->eoShotTimer--;
++    } else if (this->actor.xzDistToPlayer > 170.0f) {
++        EoShot_OrbAimed(play, &this->actor, sKinds[this->unk_194 & 3], &pos, 9.0f, 0);
++        Audio_PlayActorSound2(&this->actor, NA_SE_EN_PO_LAUGH2);
++        this->eoShotTimer = 100 + (s16)Rand_ZeroFloat(50.0f);
++    }
++}
++
+ void EnPoSisters_Update(Actor* thisx, PlayState* play) {
+     s32 pad;
+     EnPoSisters* this = (EnPoSisters*)thisx;
+@@ -1195,6 +1234,7 @@ void EnPoSisters_Update(Actor* thisx, PlayState* play) {
+         func_80ADC034(this, play);
+     }
+     this->actionFunc(this, play);
++    EnPoSisters_EoExtras(this, play);
+     if (this->unk_199 & 0x1F) {
+         if (this->unk_199 & 8) {
+             func_80ADA35C(this, play);
+diff --git a/soh/src/overlays/actors/ovl_En_Po_Sisters/z_en_po_sisters.h b/soh/src/overlays/actors/ovl_En_Po_Sisters/z_en_po_sisters.h
+index 5f42856..6aa6931 100644
+--- a/soh/src/overlays/actors/ovl_En_Po_Sisters/z_en_po_sisters.h
++++ b/soh/src/overlays/actors/ovl_En_Po_Sisters/z_en_po_sisters.h
+@@ -30,7 +30,9 @@ typedef struct EnPoSisters {
+     /* 0x02AC */ ColliderCylinder collider;
+     /* 0x02F8 */ MtxF unk_2F8;
+     u32 epoch;
+-} EnPoSisters; // size = 0x0338
++    // Miniboss & Enemy Overhaul
++    s16 eoShotTimer;
++} EnPoSisters;
+ 
+ void func_80ADB338(EnPoSisters* enPoSisters, PlayState* play);
+ 
+diff --git a/soh/src/overlays/actors/ovl_En_Poh/z_en_poh.c b/soh/src/overlays/actors/ovl_En_Poh/z_en_poh.c
+index 2a447d0..6d5986b 100644
+--- a/soh/src/overlays/actors/ovl_En_Poh/z_en_poh.c
++++ b/soh/src/overlays/actors/ovl_En_Poh/z_en_poh.c
+@@ -9,6 +9,7 @@
+ #include "objects/object_po_composer/object_po_composer.h"
+ #include "soh/Enhancements/game-interactor/GameInteractor_Hooks.h"
+ #include "soh/ResourceManagerHelpers.h"
++#include "enemy_overhaul.h"
+ 
+ #define FLAGS \
+     (ACTOR_FLAG_ATTENTION_ENABLED | ACTOR_FLAG_HOSTILE | ACTOR_FLAG_UPDATE_CULLING_DISABLED | ACTOR_FLAG_IGNORE_QUAKE)
+@@ -279,6 +280,9 @@ void func_80ADE1BC(EnPoh* this) {
+     this->actionFunc = func_80ADEC9C;
+     this->unk_198 = 0;
+     this->actor.speedXZ = 2.0f;
++    if (this->eoEmberTimer < 30) {
++        this->eoEmberTimer = 30;
++    }
+ }
+ 
+ void EnPoh_SetupAttack(EnPoh* this) {
+@@ -538,6 +542,22 @@ void func_80ADEC9C(EnPoh* this, PlayState* play) {
+         Math_ScaledStepToS(&this->actor.world.rot.y, this->actor.yawTowardsPlayer, 0x71C);
+     }
+     EnPoh_MoveTowardsPlayerHeight(this, play);
++
++    // Miniboss & Enemy Overhaul: while Link keeps an eye on it, a Poe flicks embers from its lantern at him
++    if (EO_ENEMIES_ON() && (this->lightColor.a == 255)) {
++        if (this->eoEmberTimer > 0) {
++            this->eoEmberTimer--;
++        } else if ((this->actor.xzDistToPlayer > 90.0f) && Player_IsFacingActor(&this->actor, 0x2AAA, play) &&
++                   Eo_CanAttack(play)) {
++            Vec3f pos = this->actor.world.pos;
++
++            pos.y += 25.0f;
++            EoShot_OrbAimed(play, &this->actor, EO_KIND_EMBER, &pos, 6.0f, 0);
++            Audio_PlayActorSound2(&this->actor, NA_SE_EN_PO_LAUGH);
++            this->eoEmberTimer = 70 + (s16)Rand_ZeroFloat(50.0f);
++        }
++    }
++
+     if (this->actor.xzDistToPlayer > 280.0f) {
+         EnPoh_SetupIdle(this);
+     } else if (this->unk_198 == 0 && this->actor.xzDistToPlayer < 140.0f &&
+diff --git a/soh/src/overlays/actors/ovl_En_Poh/z_en_poh.h b/soh/src/overlays/actors/ovl_En_Poh/z_en_poh.h
+index e0d2e7a..eb29320 100644
+--- a/soh/src/overlays/actors/ovl_En_Poh/z_en_poh.h
++++ b/soh/src/overlays/actors/ovl_En_Poh/z_en_poh.h
+@@ -57,6 +57,8 @@ typedef struct EnPoh {
+     /* 0x0308 */ ColliderJntSph colliderSph;
+     /* 0x0328 */ ColliderJntSphElement colliderSphItem;
+     /* 0x0368 */ MtxF unk_368;
+-} EnPoh; // size = 0x03A8
++    // Miniboss & Enemy Overhaul
++    s16 eoEmberTimer;
++} EnPoh;
+ 
+ #endif
+diff --git a/soh/src/overlays/actors/ovl_En_Rd/z_en_rd.c b/soh/src/overlays/actors/ovl_En_Rd/z_en_rd.c
+index 062be32..b50937c 100644
+--- a/soh/src/overlays/actors/ovl_En_Rd/z_en_rd.c
++++ b/soh/src/overlays/actors/ovl_En_Rd/z_en_rd.c
+@@ -2,6 +2,11 @@
+ #include "objects/object_rd/object_rd.h"
+ #include "soh/Enhancements/game-interactor/GameInteractor_Hooks.h"
+ #include "soh/ResourceManagerHelpers.h"
++#include "enemy_overhaul.h"
++
++// Miniboss & Enemy Overhaul
++#define EO_RD_IS_GIBDO(this) ((this)->actor.params <= -2)
++#define EO_RD_LEASH(this) (((this)->eoRallyTimer > 0) ? 450.0f : 150.0f)
+ 
+ #define FLAGS                                                                                 \
+     (ACTOR_FLAG_ATTENTION_ENABLED | ACTOR_FLAG_HOSTILE | ACTOR_FLAG_UPDATE_CULLING_DISABLED | \
+@@ -15,6 +20,7 @@ void EnRd_Draw(Actor* thisx, PlayState* play);
+ void func_80AE269C(EnRd* this);
+ void func_80AE2744(EnRd* this, PlayState* play);
+ void func_80AE2970(EnRd* this);
++void func_80AE2B90(EnRd* this, PlayState* play);
+ void func_80AE2A10(EnRd* this, PlayState* play);
+ void func_80AE2C1C(EnRd* this, PlayState* play);
+ void func_80AE2F50(EnRd* this, PlayState* play);
+@@ -215,6 +221,30 @@ void func_80AE269C(EnRd* this) {
+     EnRd_SetupAction(this, func_80AE2744);
+ }
+ 
++/**
++ * Miniboss & Enemy Overhaul: a ReDead's scream wakes the dead around it. Every idle ReDead or Gibdo within earshot
++ * shambles towards Link for a while, following him further from its post than usual.
++ */
++void EnRd_EoRally(EnRd* this, PlayState* play) {
++    Actor* other;
++
++    if (!EO_ENEMIES_ON()) {
++        return;
++    }
++    for (other = play->actorCtx.actorLists[ACTORCAT_ENEMY].head; other != NULL; other = other->next) {
++        EnRd* rd = (EnRd*)other;
++
++        if ((other->id != ACTOR_EN_RD) || (other == &this->actor) || (other->update == NULL) ||
++            (other->colChkInfo.health == 0) || (Actor_WorldDistXYZToActor(&this->actor, other) > 500.0f)) {
++            continue;
++        }
++        rd->eoRallyTimer = 240;
++        if ((rd->actionFunc == func_80AE2744) && (other->params != 2)) {
++            func_80AE2B90(rd, play);
++        }
++    }
++}
++
+ void func_80AE2744(EnRd* this, PlayState* play) {
+     SkelAnime_Update(&this->skelAnime);
+     Math_SmoothStepToS(&this->unk_30E, 0, 1, 0x64, 0);
+@@ -333,10 +363,25 @@ void func_80AE2C1C(EnRd* this, PlayState* play) {
+     this->actor.world.rot.y = this->actor.shape.rot.y;
+     SkelAnime_Update(&this->skelAnime);
+ 
+-    if (Actor_WorldDistXYZToPoint(&player->actor, &this->actor.home.pos) >= 150.0f) {
++    if (Actor_WorldDistXYZToPoint(&player->actor, &this->actor.home.pos) >= EO_RD_LEASH(this)) {
+         func_80AE2F50(this, play);
+     }
+ 
++    // Miniboss & Enemy Overhaul: a Gibdo lurches forward in a sudden lunge
++    if (EO_ENEMIES_ON() && EO_RD_IS_GIBDO(this)) {
++        if (this->eoLungeTimer > 0) {
++            this->eoLungeTimer--;
++            this->actor.speedXZ = (this->eoLungeTimer > 0) ? 4.5f : 0.4f;
++        } else if (this->eoLungeCooldown > 0) {
++            this->eoLungeCooldown--;
++        } else if ((this->actor.xzDistToPlayer > 60.0f) && (this->actor.xzDistToPlayer < 140.0f) &&
++                   Actor_IsFacingPlayer(&this->actor, 0x1000)) {
++            this->eoLungeTimer = 12;
++            this->eoLungeCooldown = 100;
++            Audio_PlayActorSound2(&this->actor, NA_SE_EN_REDEAD_AIM);
++        }
++    }
++
+     if ((ABS(sp32) < 0x1554) && (Actor_WorldDistXYZToActor(&this->actor, &player->actor) <= 150.0f)) {
+         if (!(player->stateFlags1 &
+               (PLAYER_STATE1_DEAD | PLAYER_STATE1_HANGING_OFF_LEDGE | PLAYER_STATE1_CLIMBING_LEDGE |
+@@ -345,6 +390,7 @@ void func_80AE2C1C(EnRd* this, PlayState* play) {
+             if (this->unk_306 == 0) {
+                 if (!(this->unk_312 & PLAYER_STATE2_GRABBED_BY_ENEMY) &&
+                     GameInteractor_Should(VB_REDEAD_GIBDO_FREEZE_LINK, true, this)) {
++                    EnRd_EoRally(this, play);
+                     player->actor.freezeTimer = 40;
+                     Player_SetAutoLockOnActor(play, &this->actor);
+                     GET_PLAYER(play)->autoLockOnActor = &this->actor;
+@@ -417,7 +463,7 @@ void func_80AE2FD0(EnRd* this, PlayState* play) {
+     if (!(player->stateFlags1 & (PLAYER_STATE1_DEAD | PLAYER_STATE1_HANGING_OFF_LEDGE | PLAYER_STATE1_CLIMBING_LEDGE |
+                                  PLAYER_STATE1_JUMPING | PLAYER_STATE1_FREEFALL | PLAYER_STATE1_CLIMBING_LADDER)) &&
+         !(player->stateFlags2 & PLAYER_STATE2_GRABBED_BY_ENEMY) &&
+-        (Actor_WorldDistXYZToPoint(&player->actor, &this->actor.home.pos) < 150.0f)) {
++        (Actor_WorldDistXYZToPoint(&player->actor, &this->actor.home.pos) < EO_RD_LEASH(this))) {
+         this->actor.targetMode = 0;
+         func_80AE2B90(this, play);
+     } else if (this->actor.params > 0) {
+@@ -816,6 +862,9 @@ void EnRd_Update(Actor* thisx, PlayState* play) {
+     Player* player = GET_PLAYER(play);
+     s32 pad2;
+ 
++    if (this->eoRallyTimer > 0) {
++        this->eoRallyTimer--;
++    }
+     func_80AE4114(this, play);
+ 
+     if (gSaveContext.sunsSongState != SUNSSONG_INACTIVE && this->unk_318 == 0) {
+diff --git a/soh/src/overlays/actors/ovl_En_Rd/z_en_rd.h b/soh/src/overlays/actors/ovl_En_Rd/z_en_rd.h
+index c7518f5..55caac8 100644
+--- a/soh/src/overlays/actors/ovl_En_Rd/z_en_rd.h
++++ b/soh/src/overlays/actors/ovl_En_Rd/z_en_rd.h
+@@ -32,6 +32,10 @@ typedef struct EnRd {
+     /* 0x031C */ u8 unk_31C;
+     /* 0x031D */ u8 unk_31D;
+     /* 0x0320 */ ColliderCylinder collider;
+-} EnRd; // size = 0x036C
++    // Miniboss & Enemy Overhaul
++    s16 eoRallyTimer;
++    s16 eoLungeTimer;
++    s16 eoLungeCooldown;
++} EnRd;
+ 
+ #endif
+diff --git a/soh/src/overlays/actors/ovl_En_Rr/z_en_rr.c b/soh/src/overlays/actors/ovl_En_Rr/z_en_rr.c
+index 8c8f3db..8e7f7fe 100644
+--- a/soh/src/overlays/actors/ovl_En_Rr/z_en_rr.c
++++ b/soh/src/overlays/actors/ovl_En_Rr/z_en_rr.c
+@@ -8,6 +8,7 @@
+ #include "objects/object_rr/object_rr.h"
+ #include "vt.h"
+ #include "soh/Enhancements/game-interactor/GameInteractor_Hooks.h"
++#include "enemy_overhaul.h"
+ #include <assert.h>
+ 
+ #define FLAGS                                                                                 \
+@@ -583,6 +584,38 @@ void EnRr_Approach(EnRr* this, PlayState* play) {
+     }
+ }
+ 
++/**
++ * Miniboss & Enemy Overhaul: with its mouth open, a Like Like breathes in, dragging Link (and the dust around him)
++ * towards it. He can walk out of it, and Iron Boots hold him in place.
++ */
++void EnRr_EoInhale(EnRr* this, PlayState* play) {
++    Player* player = GET_PLAYER(play);
++    Vec3f pos;
++    Vec3f velocity;
++    Vec3f accel = { 0.0f, 0.0f, 0.0f };
++    s16 yaw;
++    f32 dist;
++
++    if ((this->actor.xzDistToPlayer > 50.0f) && (this->actor.xzDistToPlayer < 260.0f) &&
++        (fabsf(this->actor.yDistToPlayer) < 60.0f) && Eo_CanAttack(play) && Eo_PlayerOnGround(play) &&
++        (player->currentBoots != PLAYER_BOOTS_IRON) && !(player->stateFlags2 & PLAYER_STATE2_GRABBED_BY_ENEMY)) {
++        player->pushedYaw = this->actor.yawTowardsPlayer + 0x8000;
++        player->pushedSpeed = 3.5f;
++    }
++
++    if ((this->frameCount % 2) == 0) {
++        yaw = this->actor.yawTowardsPlayer + (s16)Rand_CenteredFloat(0x4000);
++        dist = 70.0f + Rand_ZeroFloat(90.0f);
++        pos.x = this->mouthPos.x + (Math_SinS(yaw) * dist);
++        pos.y = this->actor.world.pos.y + 5.0f + Rand_ZeroFloat(40.0f);
++        pos.z = this->mouthPos.z + (Math_CosS(yaw) * dist);
++        velocity.x = (this->mouthPos.x - pos.x) * 0.09f;
++        velocity.y = (this->mouthPos.y - pos.y) * 0.09f;
++        velocity.z = (this->mouthPos.z - pos.z) * 0.09f;
++        func_800286CC(play, &pos, &velocity, &accel, 60, 10);
++    }
++}
++
+ void EnRr_Reach(EnRr* this, PlayState* play) {
+     Math_SmoothStepToS(&this->actor.shape.rot.y, this->actor.yawTowardsPlayer, 0xA, 0x1F4, 0);
+     this->actor.world.rot.y = this->actor.shape.rot.y;
+@@ -619,6 +652,13 @@ void EnRr_Reach(EnRr* this, PlayState* play) {
+             }
+             break;
+     }
++
++    // Miniboss & Enemy Overhaul
++    if (EO_ENEMIES_ON() && (this->actionFunc == EnRr_Reach) &&
++        ((this->reachState == REACH_OPEN) || (this->reachState == REACH_GAPE) ||
++         ((this->reachState == REACH_CLOSE) && (this->actionTimer > 6)))) {
++        EnRr_EoInhale(this, play);
++    }
+ }
+ 
+ void EnRr_GrabPlayer(EnRr* this, PlayState* play) {
+diff --git a/soh/src/overlays/actors/ovl_En_Test/z_en_test.c b/soh/src/overlays/actors/ovl_En_Test/z_en_test.c
+index 0bcf45a..03f348e 100644
+--- a/soh/src/overlays/actors/ovl_En_Test/z_en_test.c
++++ b/soh/src/overlays/actors/ovl_En_Test/z_en_test.c
+@@ -8,6 +8,7 @@
+ #include "objects/object_sk2/object_sk2.h"
+ #include "soh/Enhancements/game-interactor/GameInteractor_Hooks.h"
+ #include "soh/ResourceManagerHelpers.h"
++#include "enemy_overhaul.h"
+ 
+ #define FLAGS (ACTOR_FLAG_ATTENTION_ENABLED | ACTOR_FLAG_HOSTILE | ACTOR_FLAG_UPDATE_CULLING_DISABLED)
+ 
+@@ -283,7 +284,7 @@ void EnTest_Init(Actor* thisx, PlayState* play) {
+     Collider_SetQuad(play, &this->swordCollider, &this->actor, &sSwordColliderInit);
+ 
+     this->actor.colChkInfo.mass = MASS_HEAVY;
+-    this->actor.colChkInfo.health = 10;
++    this->actor.colChkInfo.health = EO_HP2(10);
+ 
+     slashBlure.p1StartColor[0] = slashBlure.p1StartColor[1] = slashBlure.p1StartColor[2] = slashBlure.p1StartColor[3] =
+         slashBlure.p2StartColor[0] = slashBlure.p2StartColor[1] = slashBlure.p2StartColor[2] =
+@@ -904,6 +905,7 @@ void EnTest_SetupSlashDown(EnTest* this) {
+     this->actor.speedXZ = 0.0f;
+     EnTest_SetupAction(this, EnTest_SlashDown);
+     this->swordCollider.info.toucher.damage = 16;
++    this->eoWaveDone = false;
+ 
+     if (this->unk_7DE != 0) {
+         this->unk_7DE = 3;
+@@ -927,6 +929,18 @@ void EnTest_SlashDown(EnTest* this, PlayState* play) {
+         this->meleeWeaponState = 0;
+     }
+ 
++    // Miniboss & Enemy Overhaul: the chop splits the floor towards Link
++    if (!this->eoWaveDone && (this->skelAnime.curFrame >= 10.0f)) {
++        this->eoWaveDone = true;
++        if (EO_MB_ATTACKS_ON() && Eo_CanAttack(play) && (this->actor.bgCheckFlags & 1)) {
++            Vec3f pos = this->actor.world.pos;
++
++            pos.x += Math_SinS(this->actor.shape.rot.y) * 50.0f;
++            pos.z += Math_CosS(this->actor.shape.rot.y) * 50.0f;
++            EoShot_GroundWave(play, &this->actor, EO_LOOK_DUST, &pos, this->actor.shape.rot.y, 10.0f, 40, 0x10);
++        }
++    }
++
+     if (SkelAnime_Update(&this->skelAnime)) {
+         if ((play->gameplayFrames % 2) != 0) {
+             EnTest_SetupSlashDownEnd(this);
+@@ -1117,6 +1131,10 @@ void EnTest_Jumpslash(EnTest* this, PlayState* play) {
+     if (this->actor.world.pos.y <= this->actor.floorHeight) {
+         if (this->actor.speedXZ != 0.0f) {
+             Audio_PlayActorSound2(&this->actor, NA_SE_EN_DODO_M_GND);
++            // Miniboss & Enemy Overhaul: the landing sends a shockwave along the floor (jump it)
++            if (EO_MB_ATTACKS_ON() && Eo_CanAttack(play)) {
++                EoShot_Ring(play, &this->actor, EO_LOOK_DUST, &this->actor.world.pos, 240.0f, 10.0f, 0x10);
++            }
+         }
+ 
+         this->actor.world.pos.y = this->actor.floorHeight;
+@@ -1510,7 +1528,7 @@ void func_80862E6C(EnTest* this, PlayState* play) {
+         }
+     } else {
+         if (this->actor.home.rot.x == 0) {
+-            this->actor.colChkInfo.health = 10;
++            this->actor.colChkInfo.health = EO_HP2(10);
+ 
+             if (this->actor.params == STALFOS_TYPE_4) {
+                 this->actor.params = -1;
+@@ -1663,6 +1681,14 @@ void EnTest_UpdateDamage(EnTest* this, PlayState* play) {
+         if (this->unk_7C8 >= 0xA) {
+             this->actor.speedXZ = -4.0f;
+         }
++
++        // Miniboss & Enemy Overhaul: hacking at his shield sometimes gets Link shoved back by it
++        if (EO_MB_ATTACKS_ON() && (this->eoBashCooldown == 0) && (this->actor.xzDistToPlayer < 100.0f) &&
++            (Rand_ZeroOne() < 0.4f) && Eo_CanAttack(play) && (player->invincibilityTimer == 0)) {
++            func_8002F7A0(play, &this->actor, 7.0f, this->actor.yawTowardsPlayer, 4.0f);
++            Audio_PlayActorSound2(&this->actor, NA_SE_IT_SHIELD_BOUND);
++            this->eoBashCooldown = 60;
++        }
+     } else if (this->bodyCollider.base.acFlags & AC_HIT) {
+         this->bodyCollider.base.acFlags &= ~AC_HIT;
+ 
+@@ -1709,6 +1735,9 @@ void EnTest_Update(Actor* thisx, PlayState* play) {
+     u32 floorProperty;
+     s32 pad;
+ 
++    if (this->eoBashCooldown > 0) {
++        this->eoBashCooldown--;
++    }
+     EnTest_UpdateDamage(this, play);
+ 
+     if (this->actor.colChkInfo.damageEffect != STALFOS_DMGEFF_FIREMAGIC) {
+diff --git a/soh/src/overlays/actors/ovl_En_Test/z_en_test.h b/soh/src/overlays/actors/ovl_En_Test/z_en_test.h
+index e48fd8a..a70dc44 100644
+--- a/soh/src/overlays/actors/ovl_En_Test/z_en_test.h
++++ b/soh/src/overlays/actors/ovl_En_Test/z_en_test.h
+@@ -100,7 +100,10 @@ typedef struct EnTest {
+     /* 0x810 */ ColliderCylinder bodyCollider;
+     /* 0x85C */ ColliderQuad swordCollider;
+     /* 0x8DC */ ColliderCylinder shieldCollider;
+-} EnTest; // size = 0x928
++    // Miniboss & Enemy Overhaul
++    u8 eoWaveDone;
++    s16 eoBashCooldown;
++} EnTest;
+ 
+ typedef enum {
+     /* 0 */ STALFOS_TYPE_INVISIBLE,
+diff --git a/soh/src/overlays/actors/ovl_En_Torch2/z_en_torch2.c b/soh/src/overlays/actors/ovl_En_Torch2/z_en_torch2.c
+index ceca597..c6efddc 100644
+--- a/soh/src/overlays/actors/ovl_En_Torch2/z_en_torch2.c
++++ b/soh/src/overlays/actors/ovl_En_Torch2/z_en_torch2.c
+@@ -7,6 +7,7 @@
+ #include "z_en_torch2.h"
+ #include "objects/object_torch2/object_torch2.h"
+ #include "soh/Enhancements/game-interactor/GameInteractor_Hooks.h"
++#include "enemy_overhaul.h"
+ 
+ #define FLAGS                                                                                 \
+     (ACTOR_FLAG_ATTENTION_ENABLED | ACTOR_FLAG_HOSTILE | ACTOR_FLAG_UPDATE_CULLING_DISABLED | \
+@@ -89,6 +90,15 @@ static u8 sStaggerTimer;
+ static s8 sLastSwordAnim;
+ static u8 sAlpha;
+ 
++// Miniboss & Enemy Overhaul: Dark Link (there is only ever one, so his extra state is static like the rest)
++static s16 sEoMaxHealth;
++static s16 sEoBoltTimer;
++static s16 sEoBoltCharge;
++static s16 sEoNovaTimer;
++static s16 sEoNovaCharge;
++static s16 sEoEchoTimer;
++static u8 sEoWasDodging;
++
+ static DamageTable sDamageTable = {
+     /* Deku nut      */ DMG_ENTRY(0, 0x1),
+     /* Deku stick    */ DMG_ENTRY(2, 0x0),
+@@ -151,7 +161,14 @@ void EnTorch2_Init(Actor* thisx, PlayState* play2) {
+     this->shieldQuad.base.atFlags = AT_ON | AT_TYPE_ENEMY;
+     this->shieldQuad.base.acFlags = AC_ON | AC_HARD | AC_TYPE_PLAYER;
+     this->actor.colChkInfo.damageTable = &sDamageTable;
+-    this->actor.colChkInfo.health = gSaveContext.healthCapacity >> 3;
++    this->actor.colChkInfo.health = CLAMP_MAX(EO_DARK_LINK_HP(gSaveContext.healthCapacity >> 3), 255);
++    sEoMaxHealth = this->actor.colChkInfo.health;
++    sEoBoltTimer = 90;
++    sEoBoltCharge = 0;
++    sEoNovaTimer = 240;
++    sEoNovaCharge = 0;
++    sEoEchoTimer = 0;
++    sEoWasDodging = false;
+     this->actor.colChkInfo.cylRadius = 60;
+     this->actor.colChkInfo.cylHeight = 100;
+     play->func_11D54(this, play);
+@@ -202,6 +219,11 @@ s32 EnTorch2_SwingSword(PlayState* play, Input* input, Player* this) {
+         attackDelay = 15;
+         noAttackChance += 0.3f;
+     }
++    // Miniboss & Enemy Overhaul: once badly hurt he swings twice as often (still easing off when Link is low)
++    if (EO_DARK_LINK_ON() && (sEoMaxHealth > 0) &&
++        EO_AT_OR_BELOW(this->actor.colChkInfo.health, sEoMaxHealth, 1, 2)) {
++        attackDelay = (attackDelay == 15) ? 7 : 3;
++    }
+     if (sAlpha != 255) {
+         noAttackChance += 2.0f;
+     }
+@@ -236,6 +258,119 @@ void EnTorch2_Backflip(Player* this, Input* input, Actor* thisx) {
+     sCounterState = 0;
+ }
+ 
++/**
++ * Miniboss & Enemy Overhaul: Dark Link's new moves.
++ *  - Shadow bolts: when Link keeps his distance, Dark Link stops, gathers darkness in his sword hand and throws it
++ *    (three at once once he's badly hurt). If Link shoots at him, he dodges and answers with a bolt of his own.
++ *  - Dark nova: when Link stays close for long, he plants his feet while darkness rises around him, then a ring of
++ *    it bursts outward along the floor. Any jump, sidehop or backflip clears it.
++ *  - Once badly hurt: he swings twice as often, and bursts out of the water in darkness when he comes back.
++ * He stands still for the whole wind-up of both moves, which is a good moment to hit him.
++ */
++void EnTorch2_EoExtras(Player* this, PlayState* play, Input* input, Actor* attackItem) {
++    s32 enraged;
++    Vec3f pos;
++
++    if (!EO_DARK_LINK_ON() || (sActionState != ENTORCH2_ATTACK) || (sAlpha != 255) || (sSwordJumpState != 0) ||
++        (this->actor.colChkInfo.health == 0) || !Eo_CanAttack(play)) {
++        sEoBoltCharge = sEoNovaCharge = 0;
++        return;
++    }
++
++    enraged = EO_AT_OR_BELOW(this->actor.colChkInfo.health, sEoMaxHealth, 1, 2);
++
++    // The burst of darkness when he comes back from the water
++    if (sEoEchoTimer > 0) {
++        sEoEchoTimer--;
++        if (sEoEchoTimer == 0) {
++            EoShot_Ring(play, &this->actor, EO_LOOK_DARK, &this->actor.world.pos, 240.0f, 10.0f, 0x08);
++            Audio_PlayActorSound2(&this->actor, NA_SE_EN_FANTOM_THUNDER);
++        }
++    }
++
++    // Answer a shot with a bolt once he has rolled out of its way
++    if (sDodgeRollState != 0) {
++        sEoWasDodging = true;
++    } else if (sEoWasDodging) {
++        sEoWasDodging = false;
++        if ((sEoBoltCharge == 0) && (this->actor.xzDistToPlayer > 150.0f)) {
++            sEoBoltTimer = MIN(sEoBoltTimer, 6);
++        }
++    }
++
++    // Winding up: hold still
++    if ((sEoBoltCharge > 0) || (sEoNovaCharge > 0)) {
++        input->cur.stick_x = input->cur.stick_y = 0;
++        input->cur.button &= ~(BTN_A | BTN_B);
++        this->actor.shape.rot.y = this->actor.world.rot.y = this->actor.yawTowardsPlayer;
++    }
++
++    if (sEoBoltCharge > 0) {
++        pos = this->leftHandPos;
++        if (pos.y < this->actor.world.pos.y) {
++            pos = this->actor.world.pos;
++            pos.y += 40.0f;
++        }
++        if ((sEoBoltCharge % 3) == 0) {
++            Eo_DarkPuff(play, &pos, 0.4f);
++        }
++        sEoBoltCharge--;
++        if (sEoBoltCharge == 0) {
++            if (enraged) {
++                EoShot_OrbFan(play, &this->actor, EO_KIND_DARK, &pos, 13.0f, 3, 0x1400);
++            } else {
++                EoShot_SetHoming(EoShot_OrbAimed(play, &this->actor, EO_KIND_DARK, &pos, 13.0f, 0), 0x100);
++            }
++            Audio_PlayActorSound2(&this->actor, NA_SE_IT_SWORD_SWING_HARD);
++            sEoBoltTimer = enraged ? (50 + (s16)Rand_ZeroFloat(30.0f)) : (80 + (s16)Rand_ZeroFloat(40.0f));
++        }
++        return;
++    }
++
++    if (sEoNovaCharge > 0) {
++        if ((sEoNovaCharge % 2) == 0) {
++            pos = this->actor.world.pos;
++            pos.x += Rand_CenteredFloat(60.0f);
++            pos.z += Rand_CenteredFloat(60.0f);
++            Eo_DarkPuff(play, &pos, 0.6f);
++        }
++        sEoNovaCharge--;
++        if (sEoNovaCharge == 0) {
++            EoShot_Ring(play, &this->actor, EO_LOOK_DARK, &this->actor.world.pos, 320.0f, 11.0f, 0x10);
++            Audio_PlayActorSound2(&this->actor, NA_SE_EN_FANTOM_THUNDER);
++            sEoNovaTimer = enraged ? (220 + (s16)Rand_ZeroFloat(80.0f)) : (320 + (s16)Rand_ZeroFloat(100.0f));
++        }
++        return;
++    }
++
++    if ((this->meleeWeaponState != 0) || (sCounterState != 0) || (sDodgeRollState != 0) || (attackItem != NULL) ||
++        !(this->actor.bgCheckFlags & 1)) {
++        return;
++    }
++
++    // Shadow bolts at range
++    if (this->actor.xzDistToPlayer > 220.0f) {
++        if (sEoBoltTimer > 0) {
++            sEoBoltTimer--;
++        } else {
++            sEoBoltCharge = 18;
++            Audio_PlayActorSound2(&this->actor, NA_SE_EV_FANTOM_WARP_S);
++        }
++    } else if (sEoBoltTimer < 20) {
++        sEoBoltTimer = 20;
++    }
++
++    // Dark nova up close
++    if (this->actor.xzDistToPlayer < 150.0f) {
++        if (sEoNovaTimer > 0) {
++            sEoNovaTimer--;
++        } else {
++            sEoNovaCharge = 22;
++            Audio_PlayActorSound2(&this->actor, NA_SE_EV_FANTOM_WARP_L);
++        }
++    }
++}
++
+ void EnTorch2_Update(Actor* thisx, PlayState* play2) {
+     PlayState* play = play2;
+     Player* player2 = GET_PLAYER(play2);
+@@ -553,6 +688,11 @@ void EnTorch2_Update(Actor* thisx, PlayState* play2) {
+                 Math_Vec3f_Copy(&this->actor.home.pos, &this->actor.world.pos);
+                 play->func_11D54(this, play);
+                 sActionState = ENTORCH2_ATTACK;
++                // Miniboss & Enemy Overhaul: once badly hurt he rises from the water in a burst of darkness
++                if (EO_DARK_LINK_ON() && EO_AT_OR_BELOW(this->actor.colChkInfo.health, sEoMaxHealth, 1, 2)) {
++                    sEoEchoTimer = 12;
++                    Eo_DarkPuff(play, &this->actor.world.pos, 1.5f);
++                }
+                 sStickTilt = 0.0f;
+                 if (sAlpha != 255) {
+                     sStaggerCount = 0;
+@@ -573,6 +713,8 @@ void EnTorch2_Update(Actor* thisx, PlayState* play2) {
+             break;
+     }
+ 
++    EnTorch2_EoExtras(this, play, input, attackItem);
++
+     // Causes Dark Link to shield in place when Link is using magic attacks other than the spin attack
+ 
+     if ((gSaveContext.magicState == MAGIC_STATE_METER_FLASH_1) &&
+diff --git a/soh/src/overlays/actors/ovl_En_Wallmas/z_en_wallmas.c b/soh/src/overlays/actors/ovl_En_Wallmas/z_en_wallmas.c
+index 77cedb3..5e4d646 100644
+--- a/soh/src/overlays/actors/ovl_En_Wallmas/z_en_wallmas.c
++++ b/soh/src/overlays/actors/ovl_En_Wallmas/z_en_wallmas.c
+@@ -9,6 +9,7 @@
+ #include "objects/gameplay_keep/gameplay_keep.h"
+ #include "soh/Enhancements/game-interactor/GameInteractor_Hooks.h"
+ #include "soh/ResourceManagerHelpers.h"
++#include "enemy_overhaul.h"
+ 
+ #define FLAGS (ACTOR_FLAG_ATTENTION_ENABLED | ACTOR_FLAG_HOSTILE | ACTOR_FLAG_UPDATE_CULLING_DISABLED)
+ 
+@@ -197,6 +198,14 @@ void EnWallmas_SetupLand(EnWallmas* this, PlayState* play) {
+     Actor_SpawnFloorDustRing(play, &this->actor, &this->actor.world.pos, 15.0f, 6, 20.0f, 300, 100, true);
+     Audio_PlayActorSound2(&this->actor, NA_SE_EN_FALL_LAND);
+     this->actionFunc = EnWallmas_Land;
++
++    // Miniboss & Enemy Overhaul: a Wallmaster that misses slams the floor, sending out a shockwave
++    if (EO_ENEMIES_ON()) {
++        Vec3f ringPos = this->actor.world.pos;
++
++        ringPos.y = this->actor.floorHeight;
++        EoShot_Ring(play, &this->actor, EO_LOOK_DUST, &ringPos, 140.0f, 5.0f, 0x08);
++    }
+ }
+ 
+ void EnWallmas_SetupStand(EnWallmas* this) {
+diff --git a/soh/src/overlays/actors/ovl_En_Wf/z_en_wf.c b/soh/src/overlays/actors/ovl_En_Wf/z_en_wf.c
+index 48f1714..dd56eb1 100644
+--- a/soh/src/overlays/actors/ovl_En_Wf/z_en_wf.c
++++ b/soh/src/overlays/actors/ovl_En_Wf/z_en_wf.c
+@@ -10,6 +10,7 @@
+ #include "objects/object_wf/object_wf.h"
+ #include "soh/Enhancements/game-interactor/GameInteractor_Hooks.h"
+ #include "soh/ResourceManagerHelpers.h"
++#include "enemy_overhaul.h"
+ 
+ #define FLAGS (ACTOR_FLAG_ATTENTION_ENABLED | ACTOR_FLAG_HOSTILE | ACTOR_FLAG_UPDATE_CULLING_DISABLED)
+ 
+@@ -723,6 +724,14 @@ void EnWf_RunAroundPlayer(EnWf* this, PlayState* play) {
+ void EnWf_SetupSlash(EnWf* this) {
+     Animation_PlayOnce(&this->skelAnime, &gWolfosSlashingAnim);
+     this->colliderSpheres.base.atFlags &= ~AT_BOUNCED;
++    // Miniboss & Enemy Overhaul: a White Wolfos' claws freeze one slash in three
++    if ((this->actor.params == WOLFOS_WHITE) && this->eoMiniboss && EO_MB_ATTACKS_ON() && (Rand_ZeroOne() < 0.33f)) {
++        this->colliderSpheres.elements[0].info.toucher.effect = this->colliderSpheres.elements[1].info.toucher.effect =
++            2;
++    } else {
++        this->colliderSpheres.elements[0].info.toucher.effect = this->colliderSpheres.elements[1].info.toucher.effect =
++            0;
++    }
+     this->actor.shape.rot.y = this->actor.yawTowardsPlayer;
+     this->action = WOLFOS_ACTION_SLASH;
+     this->unk_2FA = 0; // Set and not used
+@@ -1251,6 +1260,31 @@ void func_80B36F40(EnWf* this, PlayState* play) {
+     }
+ }
+ 
++/**
++ * Miniboss & Enemy Overhaul: a miniboss Wolfos that is badly hurt howls, and another of its kind answers from behind
++ * Link. The newcomer vanishes if the one that called it falls.
++ */
++void EnWf_EoHowl(EnWf* this, PlayState* play) {
++    Vec3f pos;
++
++    if (!this->eoMiniboss || this->eoHowled || !EO_MB_ATTACKS_ON() ||
++        !EO_AT_OR_BELOW(this->actor.colChkInfo.health, this->eoMaxHealth, 1, 2) || !Eo_CanAttack(play)) {
++        return;
++    }
++    this->eoHowled = true;
++    Audio_PlayActorSound2(&this->actor, NA_SE_EN_WOLFOS_CRY);
++
++    if ((EoSummon_Count(&this->actor) == 0) && Eo_PosBehindPlayer(play, 200.0f, &pos)) {
++        Actor* helper = EoSummon_Spawn(play, &this->actor, ACTOR_EN_WF, &pos,
++                                       Math_Vec3f_Yaw(&pos, &GET_PLAYER(play)->actor.world.pos),
++                                       (0xFF << 8) | (this->actor.params & 0xFF));
++
++        if (helper != NULL) {
++            ((EnWf*)helper)->eoInitDone = true; // a helper is a regular Wolfos
++        }
++    }
++}
++
+ void EnWf_UpdateDamage(EnWf* this, PlayState* play) {
+     if (this->colliderSpheres.base.acFlags & AC_BOUNCED) {
+         this->colliderSpheres.base.acFlags &= ~(AC_HIT | AC_BOUNCED);
+@@ -1294,6 +1328,7 @@ void EnWf_UpdateDamage(EnWf* this, PlayState* play) {
+                         Enemy_StartFinishingBlow(play, &this->actor);
+                     } else {
+                         EnWf_SetupDamaged(this);
++                        EnWf_EoHowl(this, play);
+                     }
+                 }
+             }
+@@ -1305,6 +1340,17 @@ void EnWf_Update(Actor* thisx, PlayState* play) {
+     s32 pad;
+     EnWf* this = (EnWf*)thisx;
+ 
++    // Miniboss & Enemy Overhaul: Wolfos placed in rooms (Sacred Forest Meadow, the Ice Cavern...) are minibosses;
++    // the ones Hyrule Field's spawners send out stay regular enemies. Only known once the spawner has claimed it.
++    if (!this->eoInitDone) {
++        this->eoInitDone = true;
++        if ((this->actor.parent == NULL) || (this->actor.parent->id != ACTOR_EN_ENCOUNT1)) {
++            this->eoMiniboss = true;
++            this->actor.colChkInfo.health = EO_HP2(this->actor.colChkInfo.health);
++        }
++        this->eoMaxHealth = this->actor.colChkInfo.health;
++    }
++
+     EnWf_UpdateDamage(this, play);
+ 
+     if (this->actor.colChkInfo.damageEffect != ENWF_DMGEFF_ICE_MAGIC) {
+diff --git a/soh/src/overlays/actors/ovl_En_Wf/z_en_wf.h b/soh/src/overlays/actors/ovl_En_Wf/z_en_wf.h
+index d94084e..3892090 100644
+--- a/soh/src/overlays/actors/ovl_En_Wf/z_en_wf.h
++++ b/soh/src/overlays/actors/ovl_En_Wf/z_en_wf.h
+@@ -81,7 +81,12 @@ typedef struct EnWf {
+     /* 0x04BC */ Vec3f unk_4BC;
+     /* 0x04C8 */ Vec3f unk_4C8;
+     /* 0x04D4 */ Vec3s unk_4D4;
+-} EnWf; // size = 0x04DC
++    // Miniboss & Enemy Overhaul
++    u8 eoInitDone;
++    u8 eoMiniboss;
++    u8 eoHowled;
++    s16 eoMaxHealth;
++} EnWf;
+ 
+ typedef enum {
+     /* 0 */ WOLFOS_NORMAL,
+diff --git a/soh/src/overlays/actors/ovl_En_Zf/z_en_zf.c b/soh/src/overlays/actors/ovl_En_Zf/z_en_zf.c
+index 99d9fba..f99e595 100644
+--- a/soh/src/overlays/actors/ovl_En_Zf/z_en_zf.c
++++ b/soh/src/overlays/actors/ovl_En_Zf/z_en_zf.c
+@@ -8,6 +8,11 @@
+ #include "objects/object_zf/object_zf.h"
+ #include "soh/Enhancements/game-interactor/GameInteractor_Hooks.h"
+ #include "soh/ResourceManagerHelpers.h"
++#include "enemy_overhaul.h"
++
++// Miniboss & Enemy Overhaul: the Dodongo's Cavern pair are minibosses, the rest follow the regular enemy toggle
++#define EO_ZF_IS_MINIBOSS(this) ((this)->actor.params >= ENZF_TYPE_LIZALFOS_MINIBOSS_A)
++#define EO_ZF_EXTRAS_ON(this) (EO_ZF_IS_MINIBOSS(this) ? EO_MB_ATTACKS_ON() : EO_ENEMIES_ON())
+ 
+ #define FLAGS (ACTOR_FLAG_ATTENTION_ENABLED | ACTOR_FLAG_HOSTILE | ACTOR_FLAG_UPDATE_CULLING_DISABLED)
+ 
+@@ -327,7 +332,7 @@ void EnZf_Init(Actor* thisx, PlayState* play) {
+         SkelAnime_Init(play, &this->skelAnime, &gZfDinolfosSkel, &gZfCryingAnim, this->jointTable, this->morphTable,
+                        ENZF_LIMB_MAX);
+     } else { // Lizalfos
+-        thisx->colChkInfo.health = 6;
++        thisx->colChkInfo.health = (thisx->params >= ENZF_TYPE_LIZALFOS_MINIBOSS_A) ? EO_HP2(6) : 6;
+         thisx->naviEnemyId = 0x0F;
+         SkelAnime_Init(play, &this->skelAnime, &gZfLizalfosSkel, &gZfCryingAnim, this->jointTable, this->morphTable,
+                        ENZF_LIMB_MAX);
+@@ -926,6 +931,7 @@ void EnZf_SetupJumpForward(EnZf* this) {
+     }
+ 
+     this->action = ENZF_ACTION_JUMP_FORWARD;
++    this->eoLanded = false;
+     Audio_PlayActorSound2(&this->actor, NA_SE_EN_RIZA_JUMP);
+     EnZf_SetupAction(this, EnZf_JumpForward);
+ }
+@@ -936,6 +942,13 @@ void EnZf_JumpForward(EnZf* this, PlayState* play) {
+         this->hopAnimIndex = 0;
+         this->actor.velocity.y = 0.0f;
+         this->actor.speedXZ = 0.0f;
++        // Miniboss & Enemy Overhaul: the leap lands with a shockwave (jump it)
++        if (!this->eoLanded) {
++            this->eoLanded = true;
++            if (EO_ZF_EXTRAS_ON(this) && Eo_CanAttack(play)) {
++                EoShot_Ring(play, &this->actor, EO_LOOK_DUST, &this->actor.world.pos, 220.0f, 10.0f, 0x08);
++            }
++        }
+     }
+ 
+     if (SkelAnime_Update(&this->skelAnime)) {
+@@ -1168,6 +1181,7 @@ void EnZf_SetupSlash(EnZf* this) {
+ 
+     this->swordCollider.base.atFlags &= ~AT_BOUNCED;
+     this->action = ENZF_ACTION_SLASH;
++    this->eoWaveDone = false;
+     Audio_PlayActorSound2(&this->actor, NA_SE_EN_RIZA_CRY);
+     this->actor.speedXZ = 0.0f;
+     EnZf_SetupAction(this, EnZf_Slash);
+@@ -1184,6 +1198,18 @@ void EnZf_Slash(EnZf* this, PlayState* play) {
+         Audio_PlayActorSound2(&this->actor, NA_SE_EN_RIZA_ATTACK);
+     }
+ 
++    // Miniboss & Enemy Overhaul: the miniboss pair's slashes carry along the floor
++    if (!this->eoWaveDone && (this->skelAnime.curFrame >= 10.0f)) {
++        this->eoWaveDone = true;
++        if (EO_ZF_IS_MINIBOSS(this) && EO_MB_ATTACKS_ON() && Eo_CanAttack(play) && (this->actor.bgCheckFlags & 1)) {
++            Vec3f pos = this->actor.world.pos;
++
++            pos.x += Math_SinS(this->actor.shape.rot.y) * 40.0f;
++            pos.z += Math_CosS(this->actor.shape.rot.y) * 40.0f;
++            EoShot_GroundWave(play, &this->actor, EO_LOOK_DUST, &pos, this->actor.shape.rot.y, 10.0f, 30, 0x08);
++        }
++    }
++
+     if (SkelAnime_Update(&this->skelAnime)) {
+         EffectBlure_AddSpace(Effect_GetByIndex(this->blureIndex));
+ 
+@@ -2027,6 +2053,56 @@ void EnZf_UpdateDamage(EnZf* this, PlayState* play) {
+     }
+ }
+ 
++/**
++ * Miniboss & Enemy Overhaul: Dinolfos breathe fire. At middle distance one stops, lets flames flicker at its jaws,
++ * then spits a short stream of fire at Link.
++ */
++void EnZf_EoBreath(EnZf* this, PlayState* play) {
++    Vec3f mouth;
++
++    if ((this->actor.params != ENZF_TYPE_DINOLFOS) || !EO_ENEMIES_ON() || (this->actor.colChkInfo.health == 0)) {
++        this->eoBreath = 0;
++        return;
++    }
++    if ((this->action == ENZF_ACTION_SLASH) || (this->action >= ENZF_ACTION_STUNNED) ||
++        (this->action == ENZF_ACTION_JUMP_FORWARD) || (this->action == ENZF_ACTION_JUMP_BACK) ||
++        (this->action == ENZF_ACTION_RECOIL_FROM_BLOCKED_SLASH) || !Eo_CanAttack(play)) {
++        this->eoBreath = 0;
++        return;
++    }
++
++    mouth = this->actor.world.pos;
++    mouth.y += 62.0f;
++    mouth.x += Math_SinS(this->actor.shape.rot.y) * 28.0f;
++    mouth.z += Math_CosS(this->actor.shape.rot.y) * 28.0f;
++
++    if (this->eoBreath > 0) {
++        this->actor.speedXZ = 0.0f;
++        Math_SmoothStepToS(&this->actor.shape.rot.y, this->actor.yawTowardsPlayer, 1, 0x800, 0);
++        this->actor.world.rot.y = this->actor.shape.rot.y;
++        this->eoBreath--;
++        if (this->eoBreath > 24) {
++            // Wind-up: flames flicker at its jaws
++            Vec3f accel = { 0.0f, 0.3f, 0.0f };
++            Vec3f vel = { 0.0f, 0.5f, 0.0f };
++
++            EffectSsKFire_Spawn(play, &mouth, &vel, &accel, 8, 0);
++        } else if ((this->eoBreath % 4) == 0) {
++            EoShot_OrbAimed(play, &this->actor, EO_KIND_EMBER, &mouth, 11.0f, (s16)Rand_CenteredFloat(0xC00));
++            Audio_PlayActorSound2(&this->actor, NA_SE_EV_FLAME_IGNITION);
++        }
++        return;
++    }
++
++    if (this->eoBreathTimer > 0) {
++        this->eoBreathTimer--;
++    } else if ((this->actor.xzDistToPlayer > 110.0f) && (this->actor.xzDistToPlayer < 280.0f) &&
++               Actor_IsFacingPlayer(&this->actor, 0x2000) && (this->actor.bgCheckFlags & 1)) {
++        this->eoBreath = 36;
++        this->eoBreathTimer = 120 + (s16)Rand_ZeroFloat(90.0f);
++    }
++}
++
+ void EnZf_Update(Actor* thisx, PlayState* play) {
+     s32 pad;
+     EnZf* this = (EnZf*)thisx;
+@@ -2055,6 +2131,7 @@ void EnZf_Update(Actor* thisx, PlayState* play) {
+         }
+ 
+         this->actionFunc(this, play);
++        EnZf_EoBreath(this, play);
+     }
+ 
+     if (this->actor.colChkInfo.health > 0) {
+diff --git a/soh/src/overlays/actors/ovl_En_Zf/z_en_zf.h b/soh/src/overlays/actors/ovl_En_Zf/z_en_zf.h
+index 5e96ece..83a3a5a 100644
+--- a/soh/src/overlays/actors/ovl_En_Zf/z_en_zf.h
++++ b/soh/src/overlays/actors/ovl_En_Zf/z_en_zf.h
+@@ -119,6 +119,11 @@ typedef struct EnZf {
+     /* 0x04E4 */ Vec3f rightFootPos;
+     /* 0x04F0 */ Vec3f leftFootPos;
+     /* 0x04FC */ Vec3f bodyPartsPos[9];
+-} EnZf; // size = 0x0568
++    // Miniboss & Enemy Overhaul
++    u8 eoLanded;
++    u8 eoWaveDone;
++    s16 eoBreathTimer;
++    s16 eoBreath;
++} EnZf;
+ 
+ #endif
